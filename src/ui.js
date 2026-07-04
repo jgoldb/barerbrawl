@@ -11,6 +11,7 @@ export class UI {
     this.audio = audio;
     this.onAction = null;
     this.screens = ['start', 'menu', 'help', 'sound', 'pause', 'gameover', 'quit', 'loading'];
+    this.currentScreen = null;
 
     // delegated button handling
     document.addEventListener('click', (e) => {
@@ -105,8 +106,9 @@ export class UI {
   // ---------- screens ----------
   showScreen(name) {
     for (const s of this.screens) $(s).classList.toggle('hidden', s !== name);
+    this.currentScreen = name;
   }
-  hideScreens() { for (const s of this.screens) $(s).classList.add('hidden'); }
+  hideScreens() { for (const s of this.screens) $(s).classList.add('hidden'); this.currentScreen = null; }
 
   showHUD(on) { $('hud').classList.toggle('hidden', !on); }
 

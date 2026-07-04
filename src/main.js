@@ -158,6 +158,14 @@ class Game {
     };
     window.addEventListener('keydown', (e) => {
       if ((e.code === 'Enter' || e.code === 'Escape') && this.state === 'intro') this.cutscene.skip();
+      // Esc backs out of a submenu (How to Brawl / Sound) to wherever it was opened from,
+      // mirroring the on-screen Back button. The top-level menus aren't submenus, so they're
+      // left alone (and during play, Esc keeps exiting pointer-lock to pause).
+      if (e.code === 'Escape' && !e.repeat) {
+        const scr = this.ui.currentScreen;
+        if (scr === 'help') { this.audio.ui('click'); this._onAction('help-back'); return; }
+        if (scr === 'sound') { this.audio.ui('click'); this._onAction('sound-back'); return; }
+      }
       if (e.code === 'KeyM' && !e.repeat) {
         const muted = this.audio.toggleMute();
         this.ui.toast(muted ? '🔇 Muted' : '🔊 Unmuted');
