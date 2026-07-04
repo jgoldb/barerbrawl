@@ -67,7 +67,7 @@ export class UI {
     $('hud').appendChild(cb);
     this.barerBar = cb; this.barerFill = cb.querySelector('.boss-fill'); this.barerName = cb.querySelector('.boss-name');
 
-    // ---- Barer finisher: the two-option prompt + the LOUIE BALLEWIE banner
+    // ---- Barer finisher: the two-option prompt + the LEWIE BALLEWIE banner
     const fp = document.createElement('div');
     fp.id = 'finisher-prompt';
     fp.innerHTML = '<div class="fin-opt fin-left"><span class="fin-key">L-CLICK</span><span class="fin-lbl">Jab</span></div>'
@@ -77,10 +77,10 @@ export class UI {
     this.finisherPromptEl = fp;
 
     const lb = document.createElement('div');
-    lb.id = 'louie-banner'; lb.textContent = 'LOUIE BALLEWIE!';
+    lb.id = 'lewie-banner'; lb.textContent = 'LEWIE BALLEWIE!';
     lb.classList.add('hidden');
     $('app').appendChild(lb);
-    this.louieEl = lb;
+    this.lewieEl = lb;
 
     // click-to-lock prompt
     const pr = document.createElement('div');
@@ -97,6 +97,7 @@ export class UI {
     this._comboBumpT = 0;
     this._toastT = 0;
     this._objT = 0;
+    this._cornerPulse = 0;
   }
 
   showPrompt(on) { this.promptEl.classList.toggle('hidden', !on); }
@@ -132,9 +133,13 @@ export class UI {
   }
 
   // ---------- cinema ----------
-  showCinema() {
+  showCinema(skippable = false) {
     const c = $('cinema');
     c.classList.remove('hidden'); c.classList.remove('closed');
+    // the "Press Enter to skip" hint only applies to the intro cutscene; the finisher
+    // and the Barer-down beat play out fully, so hide it there
+    const skip = $('cinema-skip');
+    if (skip) skip.style.display = skippable ? '' : 'none';
   }
   hideCinema() {
     const c = $('cinema');
@@ -206,6 +211,21 @@ export class UI {
     setTimeout(() => { v.style.transition = 'opacity .5s ease'; v.style.opacity = '0'; }, 60);
   }
 
+  // Wall-hug telegraph, driven each frame by the player's cornered meter (0..1):
+  // a closing-in vignette, plus a "KEEP MOVING" warning that pulses (faster as it
+  // worsens) from within the grace window, before chip damage begins.
+  setCorner(frac, dt = 0) {
+    $('corner-vignette').style.opacity = Math.min(0.9, frac * 1.05).toFixed(3);
+    const warn = $('corner-warn');
+    if (frac > 0.22) {
+      this._cornerPulse += dt * (7 + 7 * frac);
+      const pulse = 0.5 + 0.5 * Math.abs(Math.sin(this._cornerPulse));
+      warn.style.opacity = (pulse * Math.min(1, (frac - 0.12) * 1.8)).toFixed(3);
+    } else {
+      warn.style.opacity = '0';
+    }
+  }
+
   setBoss(name, frac) {
     if (frac == null) { this.bossBar.style.opacity = '0'; return; }
     this.bossBar.style.opacity = '1';
@@ -226,8 +246,8 @@ export class UI {
 
   showFinisherPrompt(on) { this.finisherPromptEl.classList.toggle('hidden', !on); }
 
-  louieBanner() {
-    const el = this.louieEl;
+  lewieBanner() {
+    const el = this.lewieEl;
     el.classList.remove('hidden');
     el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
     setTimeout(() => el.classList.add('hidden'), 2200);

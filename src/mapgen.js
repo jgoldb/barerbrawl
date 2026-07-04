@@ -104,8 +104,14 @@ export class MapGen {
       minZ: Math.min(...cornersZ), maxZ: Math.max(...cornersZ),
     };
 
-    // choose exit direction (never straight back)
-    const choices = [{ d: D, w: 5 }, { d: rotCCW(D), w: 2 }, { d: rotCW(D), w: 2 }];
+    // choose exit direction (never straight back toward the entrance). Boss halls
+    // (the Great Shul) stand the Aron Kodesh — a full-height ark — centered on the
+    // wall opposite the entrance, i.e. straight ahead (D). A straight-ahead exit would
+    // then open right behind the ark, walling the player in after the boss falls, so
+    // boss rooms only ever exit through a side wall, leaving that back wall for the ark.
+    const choices = boss
+      ? [{ d: rotCCW(D), w: 1 }, { d: rotCW(D), w: 1 }]
+      : [{ d: D, w: 5 }, { d: rotCCW(D), w: 2 }, { d: rotCW(D), w: 2 }];
     const exitDir = r.weighted(choices.map((c) => [c.d, c.w]));
 
     // exit point = center pushed to the wall along exitDir

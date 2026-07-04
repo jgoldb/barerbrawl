@@ -156,13 +156,13 @@ input.vol:focus-visible{border-color:var(--gold-bright);box-shadow:inset 0 1px 3
 .fin-lbl{font-size:clamp(15px,2vw,23px);color:#f3e8cc;text-shadow:0 2px 10px #000;}
 .fin-right .fin-lbl{font-style:italic;color:#ffd0b0;}
 
-#louie-banner{position:absolute;left:0;right:0;top:24vh;z-index:55;text-align:center;pointer-events:none;
+#lewie-banner{position:absolute;left:0;right:0;top:24vh;z-index:55;text-align:center;pointer-events:none;
   font-family:var(--disp,serif);font-weight:900;font-size:clamp(42px,9vw,124px);letter-spacing:.03em;line-height:1;
   color:#ffe27a;text-shadow:0 0 26px rgba(255,120,40,.85),0 4px 18px #000,0 0 3px #000;
   -webkit-text-stroke:2px #7a1408;}
-#louie-banner.hidden{display:none;}
-#louie-banner.pop{animation:louiePop .55s cubic-bezier(.2,1.4,.3,1) both;}
-@keyframes louiePop{0%{transform:scale(.2) rotate(-8deg);opacity:0;}
+#lewie-banner.hidden{display:none;}
+#lewie-banner.pop{animation:lewiePop .55s cubic-bezier(.2,1.4,.3,1) both;}
+@keyframes lewiePop{0%{transform:scale(.2) rotate(-8deg);opacity:0;}
   60%{transform:scale(1.16) rotate(2deg);opacity:1;}100%{transform:scale(1) rotate(0);opacity:1;}}
 
 /* ---------- HUD ---------- */
@@ -188,6 +188,15 @@ input.vol:focus-visible{border-color:var(--gold-bright);box-shadow:inset 0 1px 3
 
 #dmg-vignette{position:absolute;inset:0;pointer-events:none;opacity:0;
   box-shadow:inset 0 0 180px 40px rgba(150,20,12,.85);transition:opacity .5s ease;}
+
+/* wall-hug "cornered" telegraph: a dark claustrophobic vignette that closes in as
+   the meter builds, plus a pulsing warning that appears during the grace window */
+#corner-vignette{position:absolute;inset:0;pointer-events:none;opacity:0;
+  box-shadow:inset 0 0 220px 70px rgba(28,7,5,.92);transition:opacity .16s linear;}
+#corner-warn{position:absolute;left:50%;top:62%;transform:translateX(-50%);
+  font-family:var(--disp,serif);letter-spacing:.22em;font-size:20px;white-space:nowrap;
+  color:#ff6a44;text-shadow:0 2px 12px #000,0 0 22px rgba(255,70,30,.55);
+  opacity:0;pointer-events:none;}
 
 #hud-topleft{position:absolute;left:26px;top:22px;}
 #health-label{font-size:12px;letter-spacing:.22em;color:#c9b98e;margin-bottom:5px;opacity:.85;}

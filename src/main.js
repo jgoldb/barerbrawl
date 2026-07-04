@@ -69,6 +69,7 @@ class Game {
     this.ui = new UI(this.audio);
     this.player = new Player();
     this.player.fists.visible = false; // hidden until gameplay; keeps boot/start gate clean
+    this._baseFov = this.player.camera.fov; // rest FOV, restored after the finisher punch-in
     this.scene.add(this.player.camera);
 
     this.rng = new RNG(newSeed());
@@ -160,6 +161,11 @@ class Game {
       if (e.code === 'KeyM' && !e.repeat) {
         const muted = this.audio.toggleMute();
         this.ui.toast(muted ? '🔇 Muted' : '🔊 Unmuted');
+      }
+      // TEMP: 'B' summons a non-invulnerable Chaim Barer in front of the player (debug).
+      if (e.code === 'KeyB' && !e.repeat && this.state === 'playing') {
+        this.director.debugSpawnBarerNearPlayer(true);
+        this.ui.toast('Chaim Barer summoned (vulnerable)');
       }
     });
     window.addEventListener('blur', () => { if (this.state === 'playing' && !this.awaitingLock) this._pause(); });
@@ -301,16 +307,112 @@ class Game {
     this.ui.setBoss(null, null); this.ui.setBarer(null);
   }
 
+  // ---- Barer down: a brief cinematic "time stops" beat before the finisher --------
+  // The world freezes, the camera locks onto Chaim Barer as he buckles to his knees, the
+  // FOV punches in and the letterbox slides shut over a low sting; a quick dip to black
+  // then hands off to the interactive finisher. Kicked off by the director the frame he
+  // drops (state 'playing' -> 'barerdown').
+  _beginBarerDown(barer) {
+    this.state = 'barerdown';
+    this._bdBarer = barer;
+    this._bdT = 0;
+    this._bdDur = 1.35;
+    this._bdFlashed = false;
+
+    this.player.fists.visible = false;     // no floating FPS hands over the cinematic
+    barer.bar.visible = false;             // drop his floating HP bar
+    this.ui.setBarer(null); this.ui.setBoss(null, null);
+    this.ui.hideObjective();
+    this.ui.showHUD(false);
+    this.ui.showCinema();                  // letterbox slides shut
+
+    // duck the driving combat track and hit the dramatic sting
+    this.audio.setMusic('menu');
+    this.audio.setIntensity(0);
+    this.audio.hit(true, 0.6);
+    this.audio.barerShriek();   // his long, agonized ostrich death-scream as time slows
+    this.audio.finisherSting();
+    this.player.shake = Math.min(1.5, this.player.shake + 1.0);
+
+    // capture the camera's current framing, then solve the locked-on close-up on Barer
+    const cam = this.player.camera;
+    this._bdFromPos = cam.position.clone();
+    this._bdFromYaw = this.player.yaw;
+    this._bdFromPitch = this.player.pitch;
+    this._bdFromFov = cam.fov;
+    this._bdToFov = 46;                     // punch in
+
+    const dx = barer.pos.x - this._bdFromPos.x, dz = barer.pos.z - this._bdFromPos.z;
+    const horiz = Math.hypot(dx, dz) || 1;
+    this._bdToYaw = Math.atan2(-dx, -dz);                 // forwardXZ = (-sin y, -cos y)
+    const faceY = barer.groundY + 1.15;                  // aim at the beaten figure's face/chest
+    this._bdToPitch = Math.atan2(faceY - this._bdFromPos.y, horiz);
+    // creep a little closer for the push-in, but stay well short so we never clip him/walls
+    const dolly = Math.max(0, Math.min(0.7, horiz - 1.5));
+    this._bdToPos = this._bdFromPos.clone();
+    this._bdToPos.x += (dx / horiz) * dolly;
+    this._bdToPos.z += (dz / horiz) * dolly;
+  }
+
+  _updateBarerDown(dt) {
+    this._bdT += dt;
+    const raw = Math.min(1, this._bdT / this._bdDur);
+    const p = raw * raw * (3 - 2 * raw);   // smoothstep the whole move
+
+    // the world is frozen (director/enemy update paused) — drive Barer's crumple directly
+    if (this._bdBarer) this._bdBarer.crumple(Math.min(1, this._bdT / 0.7), this.time);
+
+    // ease the camera into a locked, pushed-in framing on him, with a decaying shake
+    const cam = this.player.camera;
+    this.player.shake = Math.max(0, this.player.shake - dt * 1.5);
+    const sh = this.player.shake * 0.05;
+    const yaw = this._bdFromYaw + shortAngle(this._bdFromYaw, this._bdToYaw) * p;
+    const pitch = lerp(this._bdFromPitch, this._bdToPitch, p);
+    cam.position.set(
+      lerp(this._bdFromPos.x, this._bdToPos.x, p) + (Math.random() * 2 - 1) * sh,
+      lerp(this._bdFromPos.y, this._bdToPos.y, p) + (Math.random() * 2 - 1) * sh,
+      lerp(this._bdFromPos.z, this._bdToPos.z, p) + (Math.random() * 2 - 1) * sh,
+    );
+    cam.rotation.set(pitch, yaw, (Math.random() * 2 - 1) * this.player.shake * 0.02, 'YXZ');
+    cam.fov = lerp(this._bdFromFov, this._bdToFov, p);
+    cam.updateProjectionMatrix();
+    this.player.viewRig.position.copy(cam.position);
+    this.player.viewRig.quaternion.copy(cam.quaternion);
+
+    // quick dip to black near the end to hide the swap into the finisher overlay
+    if (!this._bdFlashed && this._bdT >= this._bdDur - 0.22) {
+      this._bdFlashed = true;
+      this.ui.fade(true, 0.2);
+    }
+
+    // swallow any input so a click during the beat can't leak into the finisher / resumed run
+    this.input.consumeMouse();
+    this.input.consumeLight(); this.input.consumeHeavy(); this.input.consumeShove();
+
+    if (this._bdT >= this._bdDur) {
+      const b = this._bdBarer; this._bdBarer = null;
+      this._startFinisher(b);
+      this.ui.fade(false, 0.4);            // reveal the finisher as its face pushes in
+    }
+  }
+
   // ---- Barer finisher: a frozen, interactive close-up before the door opens -------
   _startFinisher(barer) {
     this.finisherActive = true;
     this.state = 'finisher';
+    if (barer) barer.root.visible = false; // the overlay takes over from the world figure
+    // the transition punched the FOV in; restore rest FOV so the close-up frames as designed
+    this.player.camera.fov = this._baseFov;
+    this.player.camera.updateProjectionMatrix();
     this.player.fists.visible = false;     // the finisher renders its own hands
     this.ui.showHUD(false);
     this.ui.showCinema();                  // cinematic letterbox
     this.ui.setBoss(null, null); this.ui.setBarer(null);
     // keep pointer lock + input enabled; the finisher reads clicks off the document
     this.finisher.begin(barer, { onDone: () => this._endFinisher() });
+    // pre-build + GPU-warm the next room now, while the finisher is frozen and the screen
+    // is still black from the transition dip, so returning to the world doesn't hitch
+    this.director.pregenNextRoom();
   }
 
   _updateFinisher(dt) {
@@ -336,6 +438,14 @@ class Game {
 
   // ---- debug helpers (headless smoke test) ----
   _debugFinisher() { if (this.state === 'playing') this._startFinisher(null); }
+  // spawn a downed Barer in front of the player and run the full down->finisher transition
+  _debugBarerDown() {
+    if (this.state !== 'playing') return;
+    const b = this.director.debugSpawnBarerNearPlayer(true);
+    b.state = 'downed'; b.setFace('attack2');
+    this.director.barer = b;
+    this._beginBarerDown(b);
+  }
 
   _showGameOver() {
     this.state = 'gameover';
@@ -364,15 +474,28 @@ class Game {
   _buildBackdrop() {
     const rng = new RNG(TITLE_SEED);
     const cell = backdropCell();
-    const inst = buildRoom(cell, rng, this.quality);
+    const S = cell.maxX;         // half-extent of the room
+    const warm = 0xffca82;
+    const backZ = -S + 0.7;      // the far wall the ark stands against
+    const bimahZ = backZ + 2.7;  // raised platform out in front of the ark
+    const elderZ = bimahZ + 1.9; // the two elders stand just ahead of the bimah
+
+    // Claim the whole "stage" at the head of the hall — plus the two elders' spots —
+    // BEFORE the room decorates itself, so its procedural tables/benches and the
+    // scattered crowd both keep clear of the hand-placed set-piece below (which is
+    // otherwise invisible to the room's occupancy). Without this the fixed seed can
+    // drop a study table straight through the bimah and wedge an elder inside it.
+    const reserve = [
+      { x: 0, z: -S + 0.9, hx: 3.4, hz: 1.3 }, // ark + ner tamid + flanking candelabra, along the back wall
+      { x: 0, z: bimahZ,    hx: 2.0, hz: 1.5 }, // bimah platform + shtender
+      { x: 0, z: elderZ,    hx: 2.0, hz: 0.7 }, // the two elders in front of the bimah
+    ];
+
+    const inst = buildRoom(cell, rng, this.quality, reserve);
     this.scene.add(inst.group);
     // both gates thrown open so the hall reads as calm and endless
     inst.entranceGate.openInstant();
     inst.exitGate.openInstant();
-
-    const S = cell.maxX;         // half-extent of the room
-    const warm = 0xffca82;
-    const backZ = -S + 0.7;      // the far wall the ark stands against
 
     // ---- centerpiece: the Aron Kodesh, framed down the length of the hall ------
     const aron = Props.aronKodesh();
@@ -391,7 +514,6 @@ class Game {
     }
 
     // ---- a raised bimah + shtender in front of the ark -------------------------
-    const bimahZ = backZ + 2.7;
     const plat = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.36, 2.6), MAT.woodMid);
     plat.position.set(0, 0.18, bimahZ); plat.castShadow = true; plat.receiveShadow = true;
     inst.group.add(plat);
@@ -421,16 +543,19 @@ class Game {
 
     // two distinguished elders flanking the bimah, turned to face the hall
     spawnActor({ coat: 0x0d0d10, skin: 0xc99c72, beard: 0x8a8073, hat: 'homburg', bigBeard: true, glasses: true },
-      -1.0, bimahZ + 1.9, -1.0, 40);
+      -1.0, elderZ, -1.0, 40);
     spawnActor({ coat: 0x101014, skin: 0xba895f, beard: 0x6a5a4a, hat: 'big', bigBeard: true, glasses: false },
-      1.0, bimahZ + 1.9, 1.0, 40);
+      1.0, elderZ, 1.0, 40);
 
     // a full hall of bochurim, scattered clear of the furniture, all turned toward
     // the ark. randomSpawn draws from guaranteed-clear grid points; a fixed seed makes
     // the whole crowd deterministic, and the avoid-circle keeps the bimah zone open.
+    // `taken` (with a 1.5m separation) stops two bochurim landing on the same spot.
     const crowd = 14;
+    const taken = [];
     for (let i = 0; i < crowd; i++) {
-      const p = inst.randomSpawn(rng, { x: 0, z: -S }, 6.5);
+      const p = inst.randomSpawn(rng, { x: 0, z: -S }, 6.5, taken, 1.5);
+      taken.push(p);
       spawnActor({
         coat: rng.pick(COAT_COLORS), skin: rng.pick(SKIN_TONES), beard: rng.pick(BEARD_TONES),
         hat: rng.chance(0.62) ? 'fedora' : (rng.chance(0.5) ? 'homburg' : 'big'),
@@ -491,7 +616,9 @@ class Game {
       j.torso.rotation.y = s * 0.04 * (1 - h);
       j.shoulderL.rotation.x = 0.55 * (1 - h) - 0.25 * h; j.shoulderL.rotation.z = 0.2;
       j.shoulderR.rotation.x = 0.55 * (1 - h) - 0.25 * h; j.shoulderR.rotation.z = -0.2;
-      j.elbowL.rotation.x = 0.7 * (1 - h) + 0.9 * h; j.elbowR.rotation.x = 0.7 * (1 - h) + 0.9 * h;
+      // elbows fold the forearm FORWARD (toward +Z / the sefer); positive x would
+      // hyperextend it back behind the upper arm.
+      j.elbowL.rotation.x = -0.7 * (1 - h) - 0.9 * h; j.elbowR.rotation.x = -0.7 * (1 - h) - 0.9 * h;
       a.root.position.y = h * Math.max(0, Math.sin(this.time * 8 + a.phase)) * 0.02; // menacing shudder
     }
   }
@@ -542,6 +669,7 @@ class Game {
       case 'title': this._updateTitle(dt); break;
       case 'intro': this._updateIntro(dt); break;
       case 'playing': this._updatePlaying(dt); break;
+      case 'barerdown': this._updateBarerDown(dt); break;
       case 'finisher': this._updateFinisher(dt); break;
       case 'paused': break;
       default: break;
@@ -593,6 +721,7 @@ class Game {
     });
     this.director.update(dt, this.time);
     this.ui.setHealth(this.player.hp / this.player.maxHp);
+    this.ui.setCorner(this.player.cornered, dt);
 
     if (this.dying) {
       this.dieTimer -= dt;
@@ -639,6 +768,15 @@ function titleCandelabra() {
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+// signed shortest angular delta from `from` to `to` (radians), so a yaw ease never
+// takes the long way round the circle
+function shortAngle(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 function fmtTime(s) {
   const m = Math.floor(s / 60), ss = Math.floor(s % 60);
   return `${m}:${ss.toString().padStart(2, '0')}`;

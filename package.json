@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node serve.mjs",
-    "serve": "node serve.mjs"
+    "serve": "node serve.mjs",
+    "bump": "node bump-version.mjs"
   },
   "private": true
 }

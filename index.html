@@ -12,6 +12,53 @@
 }
 </script>
 
+<script>
+  // --- Version detection / cache-busting ------------------------------------
+  // A network-first service worker (sw.js) makes sure a returning player always
+  // loads the freshly deployed build instead of a stale, browser-cached one.
+  // version.json is a tiny always-fresh probe used only to surface the live
+  // build id (menu footer + console) so a new deploy is easy to confirm.
+  (function () {
+    fetch('./version.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (v) {
+        if (!v) return;
+        window.__BB_VERSION__ = v;
+        try { console.info('Barer Brawl v' + v.version + ' · build ' + v.build); } catch (e) {}
+        function paint() {
+          var el = document.querySelector('.menu-foot');
+          if (el) { el.textContent = 'v' + v.version; el.title = 'build ' + v.build; }
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', paint);
+        else paint();
+      })
+      .catch(function () {});
+
+    // Only run the worker on the deployed site — never in local dev, where a
+    // caching worker just gets in the way (and could serve a stale file server).
+    var host = location.hostname;
+    var isLocalDev = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' ||
+      host === '::1' || host === '' || host.endsWith('.local');
+
+    if ('serviceWorker' in navigator) {
+      if (isLocalDev) {
+        // Tear down any worker left over from a production visit or an earlier test.
+        navigator.serviceWorker.getRegistrations()
+          .then(function (regs) { regs.forEach(function (r) { r.unregister(); }); })
+          .catch(function () {});
+      } else {
+        // updateViaCache:'none' re-fetches sw.js from the network on every load,
+        // so changes to the caching logic itself also ship promptly.
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+            .then(function (reg) { return reg.update(); })
+            .catch(function () {});
+        });
+      }
+    }
+  })();
+</script>
+
 <div id="app">
   <canvas id="game-canvas"></canvas>
 
@@ -31,6 +78,8 @@
     <div id="crosshair"><span></span><span></span><span></span><span></span></div>
     <div id="hitmarker"></div>
     <div id="dmg-vignette"></div>
+    <div id="corner-vignette"></div>
+    <div id="corner-warn">זוז · KEEP MOVING</div>
 
     <div id="hud-topleft">
       <div id="health-wrap">

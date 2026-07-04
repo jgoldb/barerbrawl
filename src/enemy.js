@@ -495,6 +495,26 @@ export class Enemy {
     j.torso.rotation.x = -0.4; j.head.rotation.x = -0.3;
     j.shoulderL.rotation.x = 0.6; j.shoulderR.rotation.x = 0.6;
   }
+  // Chaim Barer sinking to his knees during the finisher transition. `p` ramps 0→1: he
+  // buckles forward, his head hangs, arms go limp, and a terrified tremble grows. Driven
+  // straight from the game (not update) during the frozen "time stops" beat.
+  crumple(p, time) {
+    const j = this.joints;
+    const e = p * p * (3 - 2 * p);
+    j.hips.position.y = 0.82 - e * 0.34;
+    j.torso.rotation.x = 0.2 + e * 0.55; j.torso.rotation.y = 0; j.torso.rotation.z = 0;
+    j.head.rotation.x = 0.1 + e * 0.5;
+    j.thighL.rotation.x = -e * 0.9; j.thighR.rotation.x = -e * 0.9;
+    j.kneeL.rotation.x = e * 1.3; j.kneeR.rotation.x = e * 1.3;
+    j.shoulderL.rotation.x = 0.3 + e * 0.7; j.shoulderR.rotation.x = 0.3 + e * 0.7;
+    j.shoulderL.rotation.z = 0.22; j.shoulderR.rotation.z = -0.22;
+    j.elbowL.rotation.x = -0.6; j.elbowR.rotation.x = -0.6;
+    const tremble = (0.4 + p) * 0.02;
+    this.root.rotation.x = 0;
+    this.root.rotation.z = Math.sin(time * 19) * tremble * 0.7;
+    this.root.rotation.y = this.facing + Math.sin(time * 26) * tremble;
+    this.root.position.set(this.pos.x, this.groundY, this.pos.z);
+  }
   // clear line-of-sight for a throw: only full-height walls block (the sefer arcs over
   // tables and benches), so test the segment against tall colliders only.
   _canThrow(ctx, P) {

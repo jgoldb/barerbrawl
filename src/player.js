@@ -13,6 +13,39 @@ const BACKPEDAL = 0.55;
 // A punch that lands in the enemy's head band (see Enemy.headY/headR) hits this much harder.
 const HEADSHOT_MULT = 1.8;
 
+// ---- Wall-hugging penalty --------------------------------------------------
+// Backing into a wall removes the flank threat, so cornering yourself must cost
+// you instead. We sample "enclosure" by probing 8 compass points this far out;
+// a point inside a full-height wall counts as blocked. Open floor ~0, a flat wall
+// behind you ~3/8, a corner 5+/8. Furniture doesn't count (see CORNER_WALL_TOP) —
+// tables and benches are vault-over escapes, not traps.
+const CORNER_PROBE = 0.85;
+// Only true walls (and full-height obstacles) corner you — furniture is a step-over
+// escape route, not a trap, so anything shorter than this doesn't count as enclosure.
+const CORNER_WALL_TOP = 1.8;
+// The meter only builds above this blocked-fraction — a flat wall at your back is
+// enough, but you must also be STUCK (see below), so a wall to your side while you
+// run a hall never triggers it.
+const CORNER_ENCLOSE_MIN = 0.30;      // ~3 of 8 dirs
+// You're "stuck" once you've lingered within CORNER_PROGRESS of an anchor point for
+// longer than the grace; getting this far from it re-anchors and clears the timer.
+// This is what separates camping a corner (net-zero wiggling) from traversing a
+// corridor (you keep covering ground), so hallways don't get punished.
+const CORNER_PROGRESS = 0.9;
+const CORNER_STUCK_GRACE = 0.4;       // seconds pinned-in-place before it counts
+// Seconds of solid cornering to fill the meter at a flat wall (corners fill faster).
+const CORNER_FILL = 1.5;
+// The meter bleeds off this fast in the open — far quicker than it builds, so
+// committing to a move clears the danger almost at once.
+const CORNER_DECAY = 2.8;
+// (A) Chip drain: HP/second at a full meter. Only bites past CORNER_HURT_AT, giving
+// a grace window where the telegraph plays but no damage lands yet.
+const CORNER_DPS = 11;
+const CORNER_HURT_AT = 0.5;
+// (B) Pinned: with your back to the wall you can't give ground, so incoming hits
+// scale up to this multiplier at a full meter.
+const CORNER_PIN_MULT = 1.6;
+
 export class Player {
   constructor() {
     this.camera = new THREE.PerspectiveCamera(76, 1, 0.04, 70);
@@ -29,10 +62,24 @@ export class Player {
     this.jumpVel = 5.8; this.gravity = 22;
     this.vel = { x: 0, z: 0 };
 
+    // a scripted glide (e.g. the shove inward when combat trips) — eased over its
+    // duration and layered on top of normal movement so it reads as a quick step,
+    // not a teleport. Null when idle. See nudgeBy().
+    this.nudge = null;
+
     this.maxHp = 100; this.hp = 100;
     this.dead = false;
     this.invuln = 0;
     this.sinceDamage = 99;
+
+    // wall-hug pressure: 0..1 meter that ramps while you're wedged against a wall
+    // with nowhere to retreat, and drains fast in the open. Drives chip damage (A),
+    // the pinned damage-taken multiplier (B), and the HUD/heartbeat telegraph.
+    this.cornered = 0;
+    this.pinnedMult = 1;
+    this._anchor = { x: 0, z: 0 };  // where we last "made progress" from
+    this._anchorStuck = 0;          // time lingering near that anchor
+    this._heartT = 0;               // heartbeat SFX countdown
 
     this.bob = 0; this.bobActive = 0;
     this.shake = 0; this.pitchPunch = 0; this.recoil = 0;
@@ -93,6 +140,9 @@ export class Player {
     this.hp = this.maxHp; this.dead = false; this.invuln = 0; this.sinceDamage = 99;
     this.combo = 0; this.attack = null; this.shove = null; this.shake = 0; this._deadT = 0;
     this.yOff = 0; this.vy = 0; this.grounded = true; this.vel.x = 0; this.vel.z = 0;
+    this.nudge = null;
+    this.cornered = 0; this.pinnedMult = 1; this._anchorStuck = 0; this._heartT = 0;
+    this._anchor.x = x; this._anchor.z = z;
     this._sync();
   }
 
@@ -114,6 +164,8 @@ export class Player {
 
   takeDamage(dmg, srcPos) {
     if (this.dead || this.invuln > 0) return;
+    // (B) pinned against a wall — you can't roll with the hit, so it lands harder
+    dmg *= this.pinnedMult;
     this.hp -= dmg;
     this.invuln = 0.45;
     this.sinceDamage = 0;
@@ -127,6 +179,78 @@ export class Player {
   }
 
   heal(a) { this.hp = Math.min(this.maxHp, this.hp + a); }
+
+  // Slide the player by (dx,dz) smoothly over `dur` seconds instead of snapping.
+  // Applied in update() before collision, so the glide still respects walls; kept
+  // short so it clears the doorway well before the closing portcullis turns solid.
+  nudgeBy(dx, dz, dur = 0.2) {
+    this.nudge = { dx, dz, dur, t: 0, done: 0 };
+  }
+
+  // Fraction (0..1) of 8 probe directions that land inside a wall you can't step
+  // over. Cheap point-in-box test at CORNER_PROBE out — flush against a wall you're
+  // held ~radius off, so a point 0.85 out lands well inside it.
+  _enclosure(colliders) {
+    let blocked = 0;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const x = this.pos.x + Math.cos(a) * CORNER_PROBE;
+      const z = this.pos.z + Math.sin(a) * CORNER_PROBE;
+      for (let j = 0; j < colliders.length; j++) {
+        const b = colliders[j];
+        // only full-height walls corner you — benches/tables are vault-over escapes
+        if (b.top !== undefined && b.top < CORNER_WALL_TOP) continue;
+        if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) { blocked++; break; }
+      }
+    }
+    return blocked / 8;
+  }
+
+  // Ramp the wall-hug meter, then cash it out as chip damage (A) and a damage-taken
+  // multiplier (B). Building requires BOTH enclosure and being stuck-in-place, so a
+  // corridor (walls beside you, but you keep advancing) never triggers it.
+  _updateCornered(dt, ctx) {
+    // net-progress tracking: getting far enough from the anchor = you're moving on
+    const dax = this.pos.x - this._anchor.x, daz = this.pos.z - this._anchor.z;
+    if (Math.hypot(dax, daz) > CORNER_PROGRESS) {
+      this._anchor.x = this.pos.x; this._anchor.z = this.pos.z; this._anchorStuck = 0;
+    } else {
+      this._anchorStuck += dt;
+    }
+    const stuck = this._anchorStuck > CORNER_STUCK_GRACE;
+    const enc = this._enclosure(ctx.colliders);
+
+    if (!this.dead && stuck && enc >= CORNER_ENCLOSE_MIN) {
+      const over = (enc - CORNER_ENCLOSE_MIN) / (1 - CORNER_ENCLOSE_MIN); // 0..1, corner > wall
+      const rate = (0.7 + 0.9 * over) / CORNER_FILL;
+      this.cornered = Math.min(1, this.cornered + rate * dt);
+    } else {
+      this.cornered = Math.max(0, this.cornered - CORNER_DECAY * dt);
+    }
+
+    // (B) how much a hit is amplified right now — read by takeDamage
+    this.pinnedMult = 1 + (CORNER_PIN_MULT - 1) * this.cornered;
+
+    // (A) past the grace, the walls crush: chip damage applied straight to hp
+    // (bypasses i-frames), scaled from the threshold up, holding off regen.
+    if (!this.dead && this.cornered > CORNER_HURT_AT) {
+      const sev = (this.cornered - CORNER_HURT_AT) / (1 - CORNER_HURT_AT);
+      this.hp -= CORNER_DPS * sev * dt;
+      this.sinceDamage = 0;
+      if (this.hp <= 0) { this.hp = 0; this.dead = true; if (this.onDeath) this.onDeath(); }
+    }
+
+    // heartbeat telegraph, quickening as it worsens; starts inside the grace window
+    if (!this.dead && this.cornered > 0.2) {
+      this._heartT -= dt;
+      if (this._heartT <= 0) {
+        ctx.audio.heartbeat(this.cornered);
+        this._heartT = 1.15 - 0.6 * this.cornered;   // 1.15s → 0.55s
+      }
+    } else {
+      this._heartT = 0;
+    }
+  }
 
   // A gabbai/mashgiach heaves the player off a perch: launch up and away from the
   // shover so they're thrown clear of the furniture and dumped back onto the floor,
@@ -188,6 +312,7 @@ export class Player {
       any = true; hitPos = e.pos;
       if (head) { anyHead = true; headPos = e.pos; }
       ctx.audio.hit(heavy, head ? 1.5 : 1);
+      if (e.isBarer) ctx.audio.barerSquawk();   // Chaim Barer squawks like a struck ostrich
       if (res.killed) { kills++; if (this.onKill) this.onKill({ score: res.score, pos: e.pos, type: e.type }); }
     }
     // a punch that reaches a window's glass cracks it (jab) or shatters it (haymaker);
@@ -243,6 +368,7 @@ export class Player {
       const nd = dist || 1;
       if ((dx / nd) * f.x + (dz / nd) * f.z < -0.4) continue; // wide arc — catches a whole crowd, not just dead ahead
       e.takeHit(4, this.pos, true);
+      if (e.isBarer) ctx.audio.barerSquawk();                 // Chaim Barer squawks like a struck ostrich
       e.vel.x += (dx / nd) * 13 * e.arch.knockRes;            // launches them well back to open space
       e.vel.z += (dz / nd) * 13 * e.arch.knockRes;
       if (!e.dead && !e.boss) { e.state = 'stagger'; e.timer = 0.5; }
@@ -307,6 +433,18 @@ export class Player {
     if (!moving) this.bobActive = Math.max(0, this.bobActive - dt * 5);
     this._moving = moving;
 
+    // scripted glide (combat-trip shove inward): apply the eased delta since last
+    // frame on top of movement, then let collision below clamp it against walls.
+    if (this.nudge) {
+      const n = this.nudge;
+      n.t += dt;
+      const p = Math.min(1, n.t / n.dur);
+      const eased = p * p * (3 - 2 * p);   // smoothstep — ease in and out
+      const f = eased - n.done; n.done = eased;
+      this.pos.x += n.dx * f; this.pos.z += n.dz * f;
+      if (p >= 1) this.nudge = null;
+    }
+
     // horizontal collision — boxes at/under the feet (within STEP_CLEAR) don't block,
     // so once you clear a bench/table top you can move over it and land on it.
     resolveCircle(this.pos, this.radius, ctx.colliders, 3, this.yOff, STEP_CLEAR);
@@ -327,6 +465,9 @@ export class Player {
         if (!this.dead) ctx.audio.land();
       }
     }
+
+    // ---- wall-hug penalty (position is now final for the frame)
+    this._updateCornered(dt, ctx);
 
     // ---- combat input
     if (!this.dead) {

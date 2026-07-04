@@ -9,6 +9,15 @@ import { MAT } from './assets.js';
 
 const KEEP_CELLS = 4;
 
+// How far past a room's entrance wall the player's center must reach before combat
+// trips. Small, so it fires the instant you step over the threshold — the doorway is
+// the only breach in that wall, so any positive penetration means you're through it.
+const ROOM_ENTER_DEPTH = 0.35;
+// When combat trips, shove the player at least this far in from the entrance so the
+// descending portcullis seals BEHIND them instead of clipping/trapping them mid-gap.
+// Clears the gate slab (±0.25) plus the player radius (0.4) with margin to spare.
+const ROOM_ENTER_PUSH = 1.0;
+
 // The world streams rooms/corridors continuously, and each cell owns a handful of
 // point lights (chandeliers, window glows, corridor sconces). three.js bakes the
 // scene's total point-light count into every material's shader as a `#define`, so
@@ -59,6 +68,8 @@ export class Director {
     this.nav = null;          // flow-field pathfinder for the room being fought in
     this.pendingWaves = 0;
     this.waveDelay = 0;
+    this._pendingSpawn = null; // room awaiting its next wave; gates the clear check, so
+                               // it MUST reset or a mid-delay restart wedges every room shut
     this.depth = 0;
     this.kills = 0;
     this.objTimer = 0;
@@ -66,6 +77,7 @@ export class Director {
     this.boss = null;
     this.barer = null;        // Chaim Barer (every 12th hall)
     this.barerFreed = false;  // becomes true once the boss dies and he's vulnerable
+    this._pregenRoom = null;  // next room pre-built + GPU-warmed during a finisher (see pregenNextRoom)
 
     // player ctx (stable object)
     const p = this.game.player;
@@ -156,6 +168,36 @@ export class Director {
     this.cells = keep;
   }
 
+  // Pre-build the NEXT room during the Barer finisher's frozen close-up and pay its
+  // one-time GPU cost up front, while the world is hidden — so the resume frame doesn't
+  // hitch. buildRoom itself is only a few ms; the real stall is the first *draw* of the
+  // new cell (shader link + texture + vertex-buffer upload), which nothing pays until it
+  // renders. So we force that draw here: un-cull the new cells, compile their programs,
+  // and render them once to a tiny offscreen target. The cell sits beyond the still-closed
+  // exit gate, unseen behind the finisher overlay, and _clearRoom reveals it on resume.
+  pregenNextRoom() {
+    if (this._pregenRoom) return;                     // already warmed for this finisher
+    const roomInst = this._generateRoom();            // builds + adds room + outgoing corridor
+    const corrInst = this.cells[this.cells.length - 1];
+    this._pregenRoom = roomInst;
+    const R = this.game.renderer;
+    if (!R) return;                                   // no renderer (headless gen) — warm lazily on resume
+    const scene = this.game.scene, cam = this.game.player.camera;
+    const touched = [];
+    for (const inst of [roomInst, corrInst]) inst.group.traverse((o) => {
+      if (o.isMesh && o.frustumCulled) { o.frustumCulled = false; touched.push(o); }
+    });
+    try {
+      if (!this._warmTarget) this._warmTarget = new THREE.WebGLRenderTarget(16, 16);
+      R.compile(scene, cam);
+      const prev = R.getRenderTarget();
+      R.setRenderTarget(this._warmTarget);
+      R.render(scene, cam);
+      R.setRenderTarget(prev);
+    } catch (e) { /* warming is best-effort; worst case the resume pays the cost as before */ }
+    for (const o of touched) o.frustumCulled = true;  // restore normal culling for real play
+  }
+
   diffScale(d) {
     return {
       hp: 1 + d * 0.08,
@@ -232,6 +274,14 @@ export class Director {
     // aliases real detours away, leaving enemies to grind on a table with a way around it.
     this.nav = new NavField(room.innerBounds, room.getColliders(), { cell: 0.4, clearance: 0.45 });
     room.entranceGate.close();
+    // shove the player clear of the doorway so the portcullis drops behind them
+    const p = this.game.player, c = room.cell;
+    const inX = -c.entryDir.x, inZ = -c.entryDir.z;
+    const depth = this._entryDepth(room, p.pos);
+    if (depth < ROOM_ENTER_PUSH) {
+      const d = ROOM_ENTER_PUSH - depth;
+      p.nudgeBy(inX * d, inZ * d);   // smooth glide in, not a snap (see Player.nudgeBy)
+    }
     this.game.audio.gate(false);
     this.game.audio.shofar();
     this.game.audio.setMusic('combat');
@@ -277,16 +327,6 @@ export class Director {
     }
   }
 
-  // Freeze combat and let the game drive the close-up finisher. Called once, when
-  // Barer drops to his knees.
-  _beginBarerFinisher() {
-    this.barer.root.visible = false;      // the overlay takes over from here
-    this.game.audio.setMusic('menu');
-    this.game.ui.setBarer(null);
-    this.game.ui.setBoss(null, null);
-    this.game._startFinisher(this.barer);
-  }
-
   // Called by the game when the finisher's explosion resolves: clear out Barer and any
   // stragglers, then open the way onward.
   finishBarerEncounter() {
@@ -319,8 +359,11 @@ export class Director {
     this.game.ui.toast(`Hall cleared  +${bonus}`);
     // drop a kugel to recover
     this._dropPickup(room.center.x, room.center.z, room.cell.boss ? 2 : 1);
-    // build the next room now (revealed through the corridor)
-    this._generateRoom();
+    // build the next room now (revealed through the corridor) — unless the finisher
+    // already pre-built and GPU-warmed it during its frozen close-up (see pregenNextRoom),
+    // leaving the resume frame nothing heavy to do
+    if (this._pregenRoom) this._pregenRoom = null;
+    else this._generateRoom();
     // dispose cells well behind us
     this._disposeOld(room.genIndex - 1);
   }
@@ -461,9 +504,10 @@ export class Director {
       }
       g.ui.setBarer(this.barer.hp / this.barer.maxHp, this.barer.invulnerable);
     }
-    // Barer beaten down → hand off to the interactive finisher (once)
-    if (this.barer && this.barer.state === 'downed' && !g.finisherActive) {
-      this._beginBarerFinisher();
+    // Barer beaten down → play the cinematic "time stops" transition, which locks the
+    // camera onto him as he crumples and then hands off to the interactive finisher (once)
+    if (this.barer && this.barer.state === 'downed' && g.state === 'playing') {
+      g._beginBarerDown(this.barer);
       return; // don't run the clear/wave check on the frame we transition out
     }
 
@@ -514,12 +558,26 @@ export class Director {
     this._applyLightBudget();
   }
 
+  // Signed penetration of `pos` past a room's entrance wall, along the inward normal
+  // (-entryDir): 0 at the interior wall face, positive once inside the room.
+  _entryDepth(room, pos) {
+    const c = room.cell;
+    return (pos.x - c.entryPoint.x) * -c.entryDir.x + (pos.z - c.entryPoint.z) * -c.entryDir.z;
+  }
+
   _roomAt(pos) {
-    // return the newest room instance whose rect contains pos (with margin,
-    // so combat triggers only once the player is clearly inside)
+    // Newest un-triggered room the player has just stepped into. Keyed off how far
+    // they've crossed the *entrance wall* — not an inset rect — so hugging the entry
+    // wall into a corner still trips combat the moment you're through the doorway.
+    // (The old test inset every wall by 1.2u, leaving a lip you could sidle along.)
     for (let i = this.rooms.length - 1; i >= 0; i--) {
-      const c = this.rooms[i].cell;
-      if (pos.x > c.minX + 1.2 && pos.x < c.maxX - 1.2 && pos.z > c.minZ + 1.2 && pos.z < c.maxZ - 1.2) return this.rooms[i];
+      const room = this.rooms[i];
+      if (room._triggered) continue;
+      const c = room.cell;
+      // stay within the room's footprint (a slack margin) so we don't match on the
+      // entrance plane extended out past the walls
+      if (pos.x < c.minX - 0.1 || pos.x > c.maxX + 0.1 || pos.z < c.minZ - 0.1 || pos.z > c.maxZ + 0.1) continue;
+      if (this._entryDepth(room, pos) > ROOM_ENTER_DEPTH) return room;
     }
     return null;
   }

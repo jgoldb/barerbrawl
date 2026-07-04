@@ -245,7 +245,11 @@ export function buildCorridor(cell, rng, quality) {
 }
 
 // ============================================================ ROOM
-export function buildRoom(cell, rng, quality) {
+// `reserve` (optional): a list of {x,z,hx,hz,top?} zones to claim BEFORE decorating
+// and BEFORE the spawn grid is sampled. Used by the title/intro backdrop to stake out
+// its hand-placed set-piece (ark, bimah, candelabra) and fixed cast so procedural
+// furniture and the crowd both keep clear of them. Gameplay rooms pass nothing.
+export function buildRoom(cell, rng, quality, reserve = []) {
   const inst = makeInstance(cell);
   const { minX, maxX, minZ, maxZ } = cell;
   const w = maxX - minX, d = maxZ - minZ;
@@ -309,6 +313,12 @@ export function buildRoom(cell, rng, quality) {
   // ---- decoration (innerBounds must exist first — freeSpot() reads it)
   inst.innerBounds = { minX: minX + 1.0, maxX: maxX - 1.0, minZ: minZ + 1.0, maxZ: maxZ - 1.0 };
   inst._footprints = [];
+  // Stake out caller-reserved zones first: a footprint (so procedural furniture avoids
+  // them) AND a collider (so the spawn-point grid below never lands inside them).
+  for (const r of reserve) {
+    inst._footprints.push({ x: r.x, z: r.z, hx: r.hx, hz: r.hz });
+    inst.staticColliders.push({ minX: r.x - r.hx, maxX: r.x + r.hx, minZ: r.z - r.hz, maxZ: r.z + r.hz, top: r.top != null ? r.top : WALL_H });
+  }
   decorate(inst, cell, rng);
 
   // ---- spawn helpers
@@ -327,21 +337,34 @@ export function buildRoom(cell, rng, quality) {
     }
   }
 
-  inst.randomSpawn = function (rng2, avoid, minDist) {
+  // `taken`/`selfDist`: pass an accumulating list of already-used points (and a min
+  // separation) to keep successive static spawns — e.g. the title crowd — from
+  // stacking on the same grid point. Gameplay enemies drift apart on their own, so
+  // the director omits these.
+  inst.randomSpawn = function (rng2, avoid, minDist, taken, selfDist) {
     const pts = this.spawnPoints;
+    const sd2 = (selfDist || 0) * (selfDist || 0);
+    const clearOfTaken = (p) => {
+      if (!taken || !taken.length || sd2 <= 0) return true;
+      for (const t of taken) { const dx = p.x - t.x, dz = p.z - t.z; if (dx * dx + dz * dz < sd2) return false; }
+      return true;
+    };
     if (pts && pts.length) {
       const md2 = (minDist || 0) * (minDist || 0);
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 60; i++) {
         const p = pts[rng2.int(0, pts.length - 1)];
         if (avoid) { const dx = p.x - avoid.x, dz = p.z - avoid.z; if (dx * dx + dz * dz < md2) continue; }
+        if (!clearOfTaken(p)) continue;
         return { x: p.x, z: p.z };
       }
       // dense room / everything too close to the player — take the farthest clear spot
       if (avoid) {
-        let best = pts[0], bd = -1;
-        for (const p of pts) { const dx = p.x - avoid.x, dz = p.z - avoid.z, dd = dx * dx + dz * dz; if (dd > bd) { bd = dd; best = p; } }
-        return { x: best.x, z: best.z };
+        let best = null, bd = -1;
+        for (const p of pts) { if (!clearOfTaken(p)) continue; const dx = p.x - avoid.x, dz = p.z - avoid.z, dd = dx * dx + dz * dz; if (dd > bd) { bd = dd; best = p; } }
+        if (best) return { x: best.x, z: best.z };
       }
+      // last resort: any point still clear of taken, else the first point
+      for (const p of pts) if (clearOfTaken(p)) return { x: p.x, z: p.z };
       return { x: pts[0].x, z: pts[0].z };
     }
     // fallback (only if the room somehow has no clear grid point)

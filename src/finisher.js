@@ -1,7 +1,7 @@
 // The Barer finisher — an interactive close-up that plays after Chaim Barer is
 // beaten down. The player holds him by the collar with one hand; the other is free.
 //   Left-click  → Jab: punch him in the face (repeatable).
-//   Right-click → "Baruch dayan haemet": grab both ears, "LOUIE BALLEWIE!", pull them
+//   Right-click → "Baruch dayan haemet": grab both ears, "LEWIE BALLEWIE!", pull them
 //                 apart until his face explodes.
 //
 // It renders inside the player's view-scene (the same overlay pass that draws the FPS
@@ -134,9 +134,10 @@ export class BarerFinisher {
     if (this.state !== 'idle' && this.state !== 'jab') return;
     this.state = 'grab'; this.t = 0;
     this.faceMat.map = BARER.def; this.faceMat.needsUpdate = true;
-    if (this.ui.louieBanner) this.ui.louieBanner();
+    if (this.ui.lewieBanner) this.ui.lewieBanner();
     if (this.ui.showFinisherPrompt) this.ui.showFinisherPrompt(false);
     this.audio.whoosh(true);
+    this.audio.barerSquawk();   // seized by the ears — one last panicked ostrich squawk
   }
 
   update(dt) {
@@ -179,7 +180,7 @@ export class BarerFinisher {
           this.faceMat.color.setRGB(1, 0.5, 0.5);
           this.face.position.z = -1.02;                 // knocked back a hair
           this.player.shake = Math.min(1, this.player.shake + 0.4);
-          this.audio.hit(true, 0.85); this.audio.enemyHurt(1.2);
+          this.audio.hit(true, 0.85); this.audio.enemyHurt(1.2); this.audio.barerSquawk();
         }
         // face recovers toward the end
         if (p > 0.7) { this.faceMat.color.setRGB(1, 1, 1); this.face.position.z = -1.16; }
@@ -199,7 +200,12 @@ export class BarerFinisher {
           [lerp(0.5, 0.5, p), lerp(-0.62, 0.1, p), lerp(-0.66, -1.0, p)],
           [lerp(0.15, 0.1, p), -0.5, lerp(-0.2, -0.7, p)]);
         this.face.position.set(0, 0.06, -1.16);
-        if (this.t >= 0.5) { this.state = 'pull'; this.t = 0; this.faceMat.map = BARER.atk1; this.faceMat.needsUpdate = true; }
+        if (this.t >= 0.5) {
+          this.state = 'pull'; this.t = 0; this.faceMat.map = BARER.atk1; this.faceMat.needsUpdate = true;
+          // the rising ostrich scream that runs through the stretch and wails on past the
+          // pop (arg must match the pull `dur` below so its peak lands on the explosion)
+          this.audio.barerStretchScream(0.8);
+        }
         break;
       }
       case 'pull': {
@@ -231,10 +237,12 @@ export class BarerFinisher {
     this.face.visible = false;
     // hands fling outward and vanish
     this.grip.visible = false; this.free.visible = false;
-    this.player.shake = Math.min(1.4, this.player.shake + 1.0);
+    this.player.shake = Math.min(1.5, this.player.shake + 1.2);
+    // the final pop: wet gore (splat) plus a big explosive detonation (headPop). His
+    // voice is the ostrich scream still wailing over it, so no human death-grunt here.
     this.audio.splat();
-    this.audio.enemyDie(0.7);
-    if (this.ui.damageFlash) this.ui.damageFlash(0.55);
+    this.audio.headPop();
+    if (this.ui.damageFlash) this.ui.damageFlash(0.7);
 
     // gib shower: pink/red flesh bits + a couple dark specks (glasses/beard)
     const colors = [0xd98b6a, 0xc25a4a, 0xe0a58a, 0xb03a2e, 0xf0c4a8, 0x201a16];

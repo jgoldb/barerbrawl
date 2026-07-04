@@ -263,7 +263,7 @@ export class AudioEngine {
   }
 
   // Chaim Barer's head coming apart — a wet, low burst with a squelchy pitch-drop
-  // and a scatter of spatter, for the "LOUIE BALLEWIE!" finisher.
+  // and a scatter of spatter, for the "LEWIE BALLEWIE!" finisher.
   splat() {
     if (!this.ready) return;
     const t = this._now();
@@ -292,6 +292,32 @@ export class AudioEngine {
     }
   }
 
+  // A cinematic low "boom" sting for when Chaim Barer is beaten to his knees and time
+  // seems to stop before the finisher: a deep sub-drop with a metallic tension swell.
+  finisherSting() {
+    if (!this.ready) return;
+    const t = this._now();
+    // deep sub boom — the impact that drops him
+    const o = this.ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(34, t + 0.7);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.006, 0.9, 1.1);
+    o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    o.start(t); o.stop(t + 1.2);
+    // a detuned triangle sub for extra chest weight
+    const o2 = this.ctx.createOscillator(); o2.type = 'triangle';
+    o2.frequency.setValueAtTime(90, t); o2.frequency.exponentialRampToValueAtTime(30, t + 0.6);
+    const g2 = this.ctx.createGain(); this._env(g2.gain, t, 0.01, 0.4, 0.9);
+    o2.connect(g2); g2.connect(this.sfxBus);
+    o2.start(t); o2.stop(t + 1.0);
+    // metallic shimmer that swells up then cuts — the held-breath tension of the freeze
+    const n = this._noiseSrc();
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 6;
+    bp.frequency.setValueAtTime(1200, t); bp.frequency.exponentialRampToValueAtTime(3600, t + 0.9);
+    const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.4, 0.12, 0.7);
+    n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus); ng.connect(this.reverb);
+    n.start(t); n.stop(t + 1.2);
+  }
+
   playerHurt() {
     if (!this.ready) return;
     const t = this._now();
@@ -305,6 +331,228 @@ export class AudioEngine {
     const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.002, 0.32, 0.14);
     n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus);
     n.start(t); n.stop(t + 0.2);
+  }
+
+  // Chaim Barer takes a shot and lets out an indignant, ostrich-like squawk: a reedy,
+  // nasal honk that chirps up then breaks downward, with a breathy onset and a fast
+  // syrinx flutter. Everything (transpose, contour, formant, length, flutter, and an
+  // occasional doubled "squa-awk") is randomized so no two hits sound the same.
+  barerSquawk() {
+    if (!this.ready) return;
+    const t = this._now();
+    const pitch = 0.82 + Math.random() * 0.5;         // overall transpose
+    const syllables = Math.random() < 0.35 ? 2 : 1;   // sometimes he squawks twice
+    let off = 0;
+    for (let s = 0; s < syllables; s++) {
+      const st = t + off;
+      const base = (300 + Math.random() * 150) * pitch;
+      const dur = 0.16 + Math.random() * 0.12;
+      // reedy body: two detuned saws through a nasal formant
+      const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass';
+      bp.frequency.value = 1100 + Math.random() * 900; bp.Q.value = 3 + Math.random() * 3;
+      const form = this.ctx.createBiquadFilter(); form.type = 'peaking';
+      form.frequency.value = 2400 + Math.random() * 600; form.gain.value = 8; form.Q.value = 1.4;
+      const g = this.ctx.createGain(); this._env(g.gain, st, 0.008, 0.32 + Math.random() * 0.12, dur);
+      // syrinx flutter — a fast amplitude wobble adds the bird-throat rasp
+      const flut = this.ctx.createOscillator(); flut.type = 'square';
+      flut.frequency.value = 34 + Math.random() * 26;
+      const fg = this.ctx.createGain(); fg.gain.value = 0.12;
+      flut.connect(fg); fg.connect(g.gain); flut.start(st); flut.stop(st + dur + 0.05);
+      const up = base * (1.35 + Math.random() * 0.5);    // the "squa" chirp
+      const down = base * (0.5 + Math.random() * 0.16);  // the "awk" break
+      for (const det of [0.99, 1.012]) {
+        const o = this.ctx.createOscillator(); o.type = 'sawtooth';
+        o.frequency.setValueAtTime(base * det, st);
+        o.frequency.exponentialRampToValueAtTime(up * det, st + dur * 0.22);
+        o.frequency.exponentialRampToValueAtTime(down * det, st + dur);
+        o.connect(bp); o.start(st); o.stop(st + dur + 0.05);
+      }
+      bp.connect(form); form.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+      // breathy onset — a short filtered noise "ch" of expelled air
+      const n = this._noiseSrc();
+      const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1600;
+      const ng = this.ctx.createGain(); this._env(ng.gain, st, 0.002, 0.13, 0.05);
+      n.connect(hp); hp.connect(ng); ng.connect(this.sfxBus);
+      n.start(st); n.stop(st + 0.08);
+      off += dur * (0.72 + Math.random() * 0.2);
+    }
+  }
+
+  // The long, agonized ostrich shriek Chaim Barer lets out as he drops and time slows
+  // for the finisher: a wavering panic-honk that climbs into a held scream, cracks, then
+  // breaks downward into a trailing "awwwk". Three detuned saws through a nasal formant,
+  // with a widening panic-vibrato and an intensifying syrinx flutter over a breathy hiss.
+  // A cinematic one-shot; lightly randomized so replays aren't identical.
+  barerShriek() {
+    if (!this.ready) return;
+    const t = this._now(), R = () => Math.random();
+    const dur = 1.35 + R() * 0.4;
+    const base = 300 + R() * 60;
+    const hi = base * (1.9 + R() * 0.4);        // the held scream
+    const end = base * (0.42 + R() * 0.12);     // where the "awwwk" breaks down to
+    // reedy body — a nasal formant that opens as he screams then closes on the break
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 3.5;
+    bp.frequency.setValueAtTime(1000, t);
+    bp.frequency.exponentialRampToValueAtTime(2200, t + dur * 0.35);
+    bp.frequency.exponentialRampToValueAtTime(700, t + dur);
+    const form = this.ctx.createBiquadFilter(); form.type = 'peaking';
+    form.frequency.value = 2600; form.gain.value = 9; form.Q.value = 1.3;
+    // long swell in, sustain the scream, then fall away. Kept moderate: this fires
+    // together with the hit thud and finisherSting, so leave those headroom.
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.2, t + 0.09);
+    g.gain.setValueAtTime(0.2, t + dur * 0.6);
+    g.gain.exponentialRampToValueAtTime(0.14, t + dur * 0.82);
+    g.gain.exponentialRampToValueAtTime(0.0002, t + dur + 0.15);
+    // syrinx flutter — a fast throat rasp that intensifies mid-scream
+    const flut = this.ctx.createOscillator(); flut.type = 'square'; flut.frequency.value = 40;
+    const fg = this.ctx.createGain();
+    fg.gain.setValueAtTime(0.05, t);
+    fg.gain.linearRampToValueAtTime(0.16, t + dur * 0.5);
+    fg.gain.linearRampToValueAtTime(0.05, t + dur);
+    flut.connect(fg); fg.connect(g.gain); flut.start(t); flut.stop(t + dur + 0.2);
+    // panic vibrato — a pitch wobble that widens as the scream climbs
+    const vib = this.ctx.createOscillator(); vib.frequency.value = 6.5;
+    const vg = this.ctx.createGain();
+    vg.gain.setValueAtTime(base * 0.01, t);
+    vg.gain.linearRampToValueAtTime(base * 0.05, t + dur * 0.5);
+    vib.connect(vg); vib.start(t); vib.stop(t + dur + 0.2);
+    for (const det of [0.988, 1.0, 1.013]) {
+      const o = this.ctx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(base * det, t);
+      o.frequency.exponentialRampToValueAtTime(hi * det, t + dur * 0.3);
+      o.frequency.exponentialRampToValueAtTime(hi * 1.12 * det, t + dur * 0.5); // a wild crack
+      o.frequency.exponentialRampToValueAtTime(hi * 0.9 * det, t + dur * 0.6);
+      o.frequency.exponentialRampToValueAtTime(end * det, t + dur);
+      vg.connect(o.frequency);
+      o.connect(bp); o.start(t); o.stop(t + dur + 0.2);
+    }
+    bp.connect(form); form.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    // breathy air under the scream — a sustained filtered-noise hiss that fades with it
+    const n = this._noiseSrc();
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1400;
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.exponentialRampToValueAtTime(0.08, t + 0.12);
+    ng.gain.exponentialRampToValueAtTime(0.0002, t + dur);
+    n.connect(hp); hp.connect(ng); ng.connect(this.sfxBus);
+    n.start(t); n.stop(t + dur + 0.1);
+  }
+
+  // The distinct, rising ostrich scream that runs through the "Baruch dayan haemet"
+  // stretch: as his head is wrenched longer the pitch climbs and the warble tightens,
+  // topping out as it pops — then it wails on past the burst head and fades out over the
+  // tail. `stretchDur` is how long the pull takes; the scream deliberately outlasts it so
+  // it keeps going after the explosion. Fully scheduled up front (fire it at pull start).
+  barerStretchScream(stretchDur = 0.8) {
+    if (!this.ready) return;
+    const t = this._now();
+    const tail = 1.05;                        // how long it keeps wailing past the pop
+    const dur = stretchDur + tail;
+    const base = 320;
+    const stretched = base * 2.6;             // pitch it climbs to as the head elongates
+    // reedy body — detuned saws through a formant that opens as the head stretches, then
+    // closes again as the scream sags on the tail
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 3;
+    bp.frequency.setValueAtTime(1100, t);
+    bp.frequency.exponentialRampToValueAtTime(3000, t + stretchDur);
+    bp.frequency.exponentialRampToValueAtTime(900, t + dur);
+    const form = this.ctx.createBiquadFilter(); form.type = 'peaking';
+    form.frequency.value = 2800; form.gain.value = 9; form.Q.value = 1.3;
+    // in fast, swell as he's stretched, hold briefly through the pop, then fade out
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.15, t + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.2, t + stretchDur);
+    g.gain.setValueAtTime(0.2, t + stretchDur + 0.12);
+    g.gain.exponentialRampToValueAtTime(0.0002, t + dur);
+    // warble — a pitch wobble that tightens (speeds up) as he stretches
+    const vib = this.ctx.createOscillator();
+    vib.frequency.setValueAtTime(6, t);
+    vib.frequency.linearRampToValueAtTime(11, t + stretchDur);
+    const vg = this.ctx.createGain();
+    vg.gain.setValueAtTime(base * 0.015, t);
+    vg.gain.linearRampToValueAtTime(base * 0.06, t + stretchDur);
+    vib.connect(vg); vib.start(t); vib.stop(t + dur + 0.1);
+    // syrinx flutter for the throat rasp, tightening with the stretch
+    const flut = this.ctx.createOscillator(); flut.type = 'square';
+    flut.frequency.setValueAtTime(38, t);
+    flut.frequency.linearRampToValueAtTime(60, t + stretchDur);
+    const fg = this.ctx.createGain(); fg.gain.value = 0.12;
+    flut.connect(fg); fg.connect(g.gain); flut.start(t); flut.stop(t + dur + 0.1);
+    for (const det of [0.988, 1.0, 1.014]) {
+      const o = this.ctx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(base * det, t);
+      o.frequency.exponentialRampToValueAtTime(stretched * det, t + stretchDur);            // climb as stretched
+      o.frequency.exponentialRampToValueAtTime(stretched * 0.8 * det, t + stretchDur + tail * 0.4); // waver on the tail
+      o.frequency.exponentialRampToValueAtTime(stretched * 0.55 * det, t + dur);            // sag as it fades
+      vg.connect(o.frequency);
+      o.connect(bp); o.start(t); o.stop(t + dur + 0.1);
+    }
+    bp.connect(form); form.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    // breathy air layer
+    const n = this._noiseSrc();
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1500;
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.exponentialRampToValueAtTime(0.07, t + 0.1);
+    ng.gain.exponentialRampToValueAtTime(0.0002, t + dur);
+    n.connect(hp); hp.connect(ng); ng.connect(this.sfxBus);
+    n.start(t); n.stop(t + dur + 0.1);
+  }
+
+  // A big, explosive burst for the head finally popping: a sharp broadband crack, a deep
+  // detonation boom, and a bright shrapnel spray. Louder and punchier than a plain splat
+  // — layered over it for the finisher's final pop.
+  headPop() {
+    if (!this.ready) return;
+    const t = this._now();
+    // sharp crack transient — the burst
+    const n = this._noiseSrc();
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 900;
+    const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.0008, 0.72, 0.14);
+    n.connect(hp); hp.connect(ng); ng.connect(this.sfxBus); ng.connect(this.reverb);
+    n.start(t); n.stop(t + 0.2);
+    // deep detonation boom — a sub that punches then decays
+    const o = this.ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(32, t + 0.4);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.002, 0.85, 0.55);
+    o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    o.start(t); o.stop(t + 0.7);
+    // detuned triangle for extra chest weight
+    const o2 = this.ctx.createOscillator(); o2.type = 'triangle';
+    o2.frequency.setValueAtTime(120, t); o2.frequency.exponentialRampToValueAtTime(40, t + 0.3);
+    const g2 = this.ctx.createGain(); this._env(g2.gain, t, 0.003, 0.42, 0.4);
+    o2.connect(g2); g2.connect(this.sfxBus);
+    o2.start(t); o2.stop(t + 0.5);
+    // bright shrapnel spray — a scatter of high ticks flung outward
+    for (let i = 0; i < 14; i++) {
+      const st = t + Math.random() * 0.18;
+      const nn = this._noiseSrc();
+      const f = this.ctx.createBiquadFilter(); f.type = 'bandpass';
+      f.frequency.value = 1600 + Math.random() * 3200; f.Q.value = 0.8;
+      const gg = this.ctx.createGain(); this._env(gg.gain, st, 0.001, 0.12, 0.12);
+      nn.connect(f); f.connect(gg); gg.connect(this.sfxBus);
+      nn.start(st); nn.stop(st + 0.16);
+    }
+  }
+
+  // low "lub-dub" thud while wall-pinned; intensity 0..1 sets loudness and bite.
+  heartbeat(intensity = 1) {
+    if (!this.ready) return;
+    const t = this._now();
+    const amp = 0.1 + 0.45 * intensity;
+    for (let i = 0; i < 2; i++) {                 // lub … dub
+      const tt = t + i * 0.15;
+      const o = this.ctx.createOscillator(); o.type = 'sine';
+      const f0 = i ? 64 : 82;
+      o.frequency.setValueAtTime(f0, tt);
+      o.frequency.exponentialRampToValueAtTime(38, tt + 0.16);
+      const g = this.ctx.createGain(); this._env(g.gain, tt, 0.004, amp * (i ? 0.8 : 1), 0.16);
+      o.connect(g); g.connect(this.sfxBus);
+      o.start(tt); o.stop(tt + 0.22);
+    }
   }
 
   footstep() {

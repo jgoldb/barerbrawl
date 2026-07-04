@@ -15,7 +15,7 @@ export class Cutscene {
   play(beats, onDone) {
     this.beats = beats; this.i = -1; this.onDone = onDone;
     this.active = true;
-    this.ui.showCinema();
+    this.ui.showCinema(true); // intro is skippable — show the "Press Enter to skip" hint
     this._advance();
     return this;
   }
