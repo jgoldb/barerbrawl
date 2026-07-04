@@ -162,11 +162,6 @@ class Game {
         const muted = this.audio.toggleMute();
         this.ui.toast(muted ? '🔇 Muted' : '🔊 Unmuted');
       }
-      // TEMP: 'B' summons a non-invulnerable Chaim Barer in front of the player (debug).
-      if (e.code === 'KeyB' && !e.repeat && this.state === 'playing') {
-        this.director.debugSpawnBarerNearPlayer(true);
-        this.ui.toast('Chaim Barer summoned (vulnerable)');
-      }
     });
     window.addEventListener('blur', () => { if (this.state === 'playing' && !this.awaitingLock) this._pause(); });
   }
