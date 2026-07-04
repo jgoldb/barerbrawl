@@ -1,0 +1,179 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Barer Brawl</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%F0%9F%91%8A</text></svg>" />
+<link rel="stylesheet" href="./css/style.css" />
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js"
+  }
+}
+</script>
+
+<div id="app">
+  <canvas id="game-canvas"></canvas>
+
+  <!-- Cinematic letterbox + subtitles -->
+  <div id="cinema" class="hidden">
+    <div class="bar bar-top"></div>
+    <div class="bar bar-bottom"></div>
+    <div id="subtitle"></div>
+    <div id="cinema-skip"><span class="only-kbd">Press <b>Enter</b> to skip</span><span class="only-touch">Tap to skip</span></div>
+  </div>
+
+  <!-- Full-screen fade -->
+  <div id="fade"></div>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair"><span></span><span></span><span></span><span></span></div>
+    <div id="hitmarker"></div>
+    <div id="dmg-vignette"></div>
+
+    <div id="hud-topleft">
+      <div id="health-wrap">
+        <div id="health-label">כח · VITALITY</div>
+        <div id="health-bar"><div id="health-fill"></div><div id="health-ghost"></div></div>
+      </div>
+    </div>
+
+    <div id="hud-topright">
+      <div id="score-line"><span class="lbl">SCORE</span> <span id="score-val">0</span></div>
+      <div id="depth-line"><span class="lbl">HALL</span> <span id="depth-val">1</span></div>
+    </div>
+
+    <div id="combo" class="hidden"><span id="combo-num">2</span><span id="combo-x">×</span><div id="combo-word">MAKKOS</div></div>
+
+    <div id="objective"></div>
+    <div id="toast"></div>
+  </div>
+
+  <!-- Start gate: first user gesture, so the AudioContext can start immediately -->
+  <div id="start" class="screen hidden">
+    <div class="start-inner" data-act="enter">
+      <div class="logo">
+        <div class="logo-heb">ברֻער בראל</div>
+        <h1>BARER&nbsp;BRAWL</h1>
+      </div>
+      <div class="start-prompt">Click to enter the yeshiva</div>
+      <div class="start-sub">Sound on · headphones recommended</div>
+    </div>
+  </div>
+
+  <!-- Title / main menu -->
+  <div id="menu" class="screen hidden">
+    <div class="menu-inner">
+      <div class="logo">
+        <div class="logo-heb">ברֻער בראל</div>
+        <h1>BARER&nbsp;BRAWL</h1>
+        <div class="tagline">Learn. Or be learned <i>at</i>.</div>
+      </div>
+      <div class="menu-buttons">
+        <button class="btn" data-act="begin">Begin the Descent</button>
+        <button class="btn" data-act="help">How to Brawl</button>
+        <button class="btn" data-act="sound">Sound</button>
+      </div>
+      <div class="menu-foot">v1.0</div>
+    </div>
+  </div>
+
+  <!-- How to play -->
+  <div id="help" class="screen hidden">
+    <div class="panel">
+      <h2>How to Brawl</h2>
+      <div class="help-grid">
+        <div><kbd>W A S D</kbd></div><div>Move through the halls</div>
+        <div><kbd>Mouse</kbd></div><div>Look around</div>
+        <div><kbd>Left Click</kbd></div><div>Jab — fast, builds combos. Aim for the <b>kop</b> — headshots hurt</div>
+        <div><kbd>Right Click</kbd></div><div>Haymaker — slow, tight cone, hits like a truck. Long recovery</div>
+        <div><kbd>Shift</kbd></div><div>Sprint</div>
+        <div><kbd>Space</kbd></div><div>Jump — spring onto a bench, then up to a tabletop to escape the swarm</div>
+        <div><kbd>E</kbd></div><div>Shove — wide, slow heave that launches a whole crowd back</div>
+        <div><kbd>Esc</kbd></div><div>Pause</div>
+      </div>
+      <p class="help-note">Each hall is sealed once you enter. Lay out every bochur to open the far gate.
+        The yeshiva has no end — only how deep you get before the chevra buries you.
+        Keep your combo alive for score, and grab a dropped <b>kugel</b> to heal.
+        <span class="only-touch"><br />On a phone or tablet: left thumb steers, drag the right to look,
+        and tap the buttons to brawl. Push the stick all the way to sprint.</span></p>
+      <button class="btn" data-act="help-back">Back</button>
+    </div>
+  </div>
+
+  <!-- Sound settings -->
+  <div id="sound" class="screen hidden">
+    <div class="panel sound-panel">
+      <h2>Sound</h2>
+      <div class="sound-grid">
+        <label for="vol-master">Master</label>
+        <input type="range" id="vol-master" class="vol" min="0" max="100" step="1" />
+        <span class="vol-val" id="vol-master-val">90%</span>
+
+        <label for="vol-music">Music</label>
+        <input type="range" id="vol-music" class="vol" min="0" max="100" step="1" />
+        <span class="vol-val" id="vol-music-val">100%</span>
+
+        <label for="vol-sfx">Effects</label>
+        <input type="range" id="vol-sfx" class="vol" min="0" max="100" step="1" />
+        <span class="vol-val" id="vol-sfx-val">100%</span>
+      </div>
+      <p class="help-note">Settings are saved for next time. Nudge <b>Effects</b> to hear a test hit. Press <b>M</b> anytime to mute/unmute.</p>
+      <button class="btn" data-act="sound-back">Back</button>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause" class="screen hidden">
+    <div class="menu-inner">
+      <h2 class="pause-title">Paused</h2>
+      <div class="menu-buttons">
+        <button class="btn" data-act="resume">Resume</button>
+        <button class="btn" data-act="restart">Restart Run</button>
+        <button class="btn" data-act="help">How to Brawl</button>
+        <button class="btn" data-act="sound">Sound</button>
+        <button class="btn ghost" data-act="tomenu">Quit to Title</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="gameover" class="screen hidden">
+    <div class="menu-inner">
+      <div class="go-heb">תם ונשלם</div>
+      <h1 class="go-title">OVERWHELMED</h1>
+      <div class="go-sub" id="go-flavor">The chevra dragged you under.</div>
+      <div id="go-stats"></div>
+      <div class="menu-buttons">
+        <button class="btn" data-act="retry">Fight Again</button>
+        <button class="btn ghost" data-act="tomenu">Quit to Title</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quit screen -->
+  <div id="quit" class="screen hidden">
+    <div class="menu-inner">
+      <div class="quit-heb">א גוטן</div>
+      <p class="quit-msg">You may now close this tab.<br />Gut voch.</p>
+    </div>
+  </div>
+
+  <div id="loading" class="screen">
+    <div class="load-inner">
+      <div class="load-heb">ברֻער בראל</div>
+      <div class="load-bar"><div class="load-fill"></div></div>
+      <div class="load-txt">Opening the sefarim…</div>
+    </div>
+  </div>
+
+  <!-- Touch-only: block play until the device is turned to landscape -->
+  <div id="rotate">
+    <div class="rotate-phone"></div>
+    <div class="rotate-title">TURN YOUR DEVICE</div>
+    <div class="rotate-sub">Barer Brawl is played in landscape. Rotate to sideways to enter the yeshiva.</div>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>

@@ -1,0 +1,11 @@
+{
+  "name": "barer-brawl",
+  "version": "1.0.0",
+  "description": "A first-person three.js beat-'em-up through an endless procedurally-generated yeshiva.",
+  "type": "module",
+  "scripts": {
+    "start": "node serve.mjs",
+    "serve": "node serve.mjs"
+  },
+  "private": true
+}

@@ -6,7 +6,9 @@ are coming for you. Fight your way out, hall by hall. There is no ending, only h
 deep you get before the chevra buries you.
 
 Everything is generated at runtime — geometry, textures, characters, sound, and music.
-No art or audio files. The only dependency is three.js (vendored offline in `vendor/`).
+The lone exception is **Chaim Barer's face**: three photo billboards in `assets/`
+(shipped with the game) used for the boss-lackey encounter every 15th hall. The only
+dependency is three.js (vendored offline in `vendor/`).
 
 ---
 
@@ -74,6 +76,7 @@ A recent Chrome/Edge/Firefox with WebGL is required.
 index.html          markup + import map (three -> ./vendor)
 css/style.css       HUD, menus, cinematic overlay
 vendor/             three.js r160 (vendored for offline use)
+assets/             Chaim Barer face billboards (the only image files) — ships with the game
 serve.mjs           zero-dependency static server
 src/
   main.js           entry: renderer, scene, state machine, game loop, intro cutscene
@@ -81,15 +84,16 @@ src/
   audio.js          procedural Web Audio SFX + klezmer (Freygish) music engine
   input.js          keyboard/mouse + pointer lock
   textures.js       canvas-generated wood / plaster / carpet / stone / sefarim
-  assets.js         shared materials & palettes
+  assets.js         shared materials & palettes (+ loads the Barer billboards)
   props.js          bookshelves, tables, shtenders, chandeliers, Aron Kodesh, …
   characters.js     jointed bochur rig + first-person fists
   mapgen.js         procedural room/corridor layout
   roombuilder.js    turns map cells into meshes + colliders + lights + gates
   collide.js        circle-vs-AABB collision
-  enemy.js          enemy AI, animation, combat
+  enemy.js          enemy AI, animation, combat (incl. Chaim Barer, the boss's lackey)
   player.js         camera rig, movement, view-model, combat, health
   cutscene.js       generic cinematic timeline director
+  finisher.js       interactive Barer finisher (Jab / "LOUIE BALLEWIE!")
   ui.js             HUD, menus, floating text, boss bar
   director.js       run orchestration: streaming, waves, difficulty, pickups
 ```
