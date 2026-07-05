@@ -116,6 +116,14 @@ class Game {
     const p = this.player;
     p.onDamage = (info) => { this.audio.playerHurt(); this.ui.damageFlash(Math.min(0.9, 0.3 + info.dmg / 45)); };
     p.onHit = (info) => {
+      // a broken guard is the cue to pile on — call it out, and teach the loop once
+      if (info.poiseBreak && info.breakPos) {
+        this.floaty3d(info.breakPos, 'GUARD BROKE!', { color: '#ffd24a', crit: true, size: 22 });
+        if (!this._taughtBreak) {
+          this._taughtBreak = true;
+          this.ui.toast('Guard broken! Pile on while they’re staggered — every hit lands harder.', 3.4);
+        }
+      }
       if (info.shove) return;
       this.ui.hitmarker();
       // reward a clean shot to the kop with a little pop of feedback

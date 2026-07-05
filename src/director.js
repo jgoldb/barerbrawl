@@ -203,6 +203,7 @@ export class Director {
       hp: 1 + d * 0.08,
       speed: Math.min(1.6, 1 + d * 0.016),
       dmg: Math.min(2.5, 1 + d * 0.05),
+      poise: Math.min(2, 1 + d * 0.035),  // guards toughen slowly — far behind HP growth
     };
   }
 
@@ -297,8 +298,8 @@ export class Director {
     if (boss) {
       this.pendingWaves = 1;
       this._spawnWave(room, { boss: true, count: Math.min(2 + Math.floor(this.depth * 0.25), 5) });
-      // every 3rd boss (every 12th hall) the boss brings his lackey, Chaim Barer
-      if (this.depth % 12 === 0) this._spawnBarer(room);
+      // every 3rd boss (every 9th hall) the boss brings his lackey, Chaim Barer
+      if (this.depth % 9 === 0) this._spawnBarer(room);
       this.game.ui.objective(this.barer ? 'THE MASHGIACH RISES — AND CHAIM BARER SNEERS' : 'THE MASHGIACH HAS RISEN', 'danger');
       this.game.ui.setBoss('The Mashgiach', 1);
     } else {

@@ -10,17 +10,37 @@ const FOOT_LIFT = 0.105;
 
 const _navDir = { x: 0, z: 0 }; // scratch for flow-field sampling (avoids per-frame alloc)
 
+// Barer face billboard: rig-local head anchor / sprite height, plus how far the
+// depth-tested sprite is pushed toward the camera each frame so his own
+// coat/shoulders can never clip through the photo (see _updateBarerFace).
+const FACE_Y = 1.74;
+const FACE_H = 0.9;
+const FACE_PUSH = 0.35;
+const _faceW = new THREE.Vector3(); // scratch: face anchor (world)
+const _faceC = new THREE.Vector3(); // scratch: camera position (world)
+
+// ---- Poise / guard -----------------------------------------------------------
+// Every enemy holds a poise pool that a jab barely dents but a Haymaker / Shove
+// chunks. When it empties the guard BREAKS: the enemy is knocked open and, for a
+// short window, takes VULN_MULT bonus damage. That's the whole point — a jab alone
+// can't stun-lock anymore, so the reward is to crack the guard with a heavy hit and
+// then pile jabs into the opening. Poise refills after a lull, so a few stray jabs
+// never accumulate into a free break across a long fight.
+const VULN_MULT = 1.7;
+const POISE_REGEN_DELAY = 1.3;  // seconds after the last guard hit before it refills
+const POISE_REGEN = 16;         // poise per second once it starts refilling
+
 // `ranged`: hurls a sefer at a player perched out of melee reach. `heaver`: the big
 // ones can instead heave a nearby perched player clean off the furniture. Together
 // these keep a table/bench from being a safe camping spot (see Enemy anti-perch AI).
 export const ARCHETYPES = {
-  bochur:    { hp: 32,  speed: 2.6, dmg: 8,  scale: 1.0,  reach: 1.5, cd: 1.25, windup: 0.42, hat: 'fedora', knockRes: 1.0, score: 100, tint: 0x0e0e12, ranged: true },
-  masmid:    { hp: 20,  speed: 3.8, dmg: 6,  scale: 0.94, reach: 1.4, cd: 0.95, windup: 0.30, hat: 'fedora', knockRes: 1.3, score: 130, glasses: true, tint: 0x14140f, ranged: true },
-  gabbai:    { hp: 78,  speed: 1.9, dmg: 17, scale: 1.22, reach: 1.7, cd: 1.6,  windup: 0.6,  hat: 'big', bigBeard: true, knockRes: 0.55, score: 260, tint: 0x0d1210, ranged: true, heaver: true },
-  mashgiach: { hp: 240, speed: 2.3, dmg: 24, scale: 1.38, reach: 2.0, cd: 1.5,  windup: 0.7,  hat: 'homburg', bigBeard: true, glasses: true, knockRes: 0.3, score: 900, boss: true, tint: 0x090b10, heaver: true },
-  // Chaim Barer — the boss's lackey (every 12th hall). Invulnerable until the
+  bochur:    { hp: 32,  speed: 2.6, dmg: 8,  scale: 1.0,  reach: 1.5, cd: 1.25, windup: 0.42, poise: 20,  hat: 'fedora', knockRes: 1.0, score: 100, tint: 0x0e0e12, ranged: true },
+  masmid:    { hp: 20,  speed: 3.8, dmg: 6,  scale: 0.94, reach: 1.4, cd: 0.95, windup: 0.30, poise: 13,  hat: 'fedora', knockRes: 1.3, score: 130, glasses: true, tint: 0x14140f, ranged: true },
+  gabbai:    { hp: 78,  speed: 1.9, dmg: 17, scale: 1.22, reach: 1.7, cd: 1.6,  windup: 0.6,  poise: 54,  hat: 'big', bigBeard: true, knockRes: 0.55, score: 260, tint: 0x0d1210, ranged: true, heaver: true },
+  mashgiach: { hp: 240, speed: 2.3, dmg: 24, scale: 1.38, reach: 2.0, cd: 1.5,  windup: 0.7,  poise: 155, hat: 'homburg', bigBeard: true, glasses: true, knockRes: 0.3, score: 900, boss: true, tint: 0x090b10, heaver: true },
+  // Chaim Barer — the boss's lackey (every 9th hall). Invulnerable until the
   // Mashgiach falls, then a soft touch. No face is drawn: a photo billboards over him.
-  barer:     { hp: 50,  speed: 2.4, dmg: 10, scale: 1.06, reach: 1.6, cd: 1.4,  windup: 0.5,  hat: 'fedora', bigBeard: false, knockRes: 0.7, score: 500, tint: 0x101014 },
+  barer:     { hp: 50,  speed: 2.4, dmg: 10, scale: 1.06, reach: 1.6, cd: 1.4,  windup: 0.5,  poise: 42,  hat: 'fedora', bigBeard: false, knockRes: 0.7, score: 500, tint: 0x101014 },
 };
 
 let _hpBar = null; // shared geometry cache
@@ -60,6 +80,15 @@ export class Enemy {
     this.speed = A.speed * depthScale.speed;
     this.dmg = A.dmg * depthScale.dmg;
 
+    // poise / guard (see VULN_MULT etc.). Scales gently with depth so a hardier late-game
+    // bochur still guards a little longer, but far slower than its HP grows — cracking a
+    // guard stays achievable all run, it's chipping the fat HP bar behind it that's the work.
+    this.maxPoise = (A.poise ?? 20) * (depthScale.poise ?? 1);
+    this.poise = this.maxPoise;
+    this.poiseRegenT = 99;  // start rested (nothing mid-refill on spawn)
+    this.vulnT = 0;         // >0 while the guard-broken punish window is open
+    this._glow = false;     // whether the vulnerable emissive tint is currently applied
+
     this.pos = { x: 0, z: 0 };
     this.vel = { x: 0, z: 0 };     // knockback velocity
     this.facing = 0;
@@ -88,15 +117,15 @@ export class Enemy {
   // along with position/scale but never rotates with the body.
   _buildBarerFace(built) {
     built.joints.head.visible = false;      // hide the sculpted head/hat/beard
-    // depthTest off + a renderOrder above the body: the face always draws fully in
-    // front of his own torso/shoulders (never half-swallowed by the coat), yet still
-    // sits under his floating bar (renderOrder 10) and under the FPS fists (separate pass).
-    const mat = new THREE.SpriteMaterial({ map: BARER.def, transparent: true, depthTest: false, depthWrite: false });
+    // Depth-tested, so walls, furniture and other bochurim occlude the face like any
+    // solid object. Keeping it clear of his OWN torso/shoulders (never half-swallowed
+    // by the coat) is handled by _updateBarerFace, which pushes the sprite toward the
+    // camera each frame. renderOrder still keeps it under his floating bar (10/11).
+    const mat = new THREE.SpriteMaterial({ map: BARER.def, transparent: true, depthWrite: false });
     const spr = new THREE.Sprite(mat);
     spr.renderOrder = 5;
-    const h = 0.9;
-    spr.scale.set(h * BARER.aspect, h, 1);
-    spr.position.set(0, 1.74, 0);           // where the head used to sit (rig-local)
+    spr.scale.set(FACE_H * BARER.aspect, FACE_H, 1);
+    spr.position.set(0, FACE_Y, 0);         // where the head used to sit (rig-local)
     this.root.add(spr);
     this.faceSprite = spr; this.faceMat = mat;
     this.faceState = 'default';
@@ -112,6 +141,23 @@ export class Enemy {
     this.faceState = state;
     this.faceMat.map = state === 'attack1' ? BARER.atk1 : (state === 'attack2' ? BARER.atk2 : BARER.def);
     this.faceMat.needsUpdate = true;
+  }
+
+  // Slide the face sprite FACE_PUSH toward the camera so the depth test can't let his
+  // own torso/arms cut into the photo, and shrink it by the same near/far ratio so the
+  // push never reads as the face growing. Runs every frame, including downed/death.
+  _updateBarerFace(camera) {
+    if (!this.faceSprite || !camera) return;
+    this.root.updateWorldMatrix(true, false);
+    _faceW.set(0, FACE_Y, 0).applyMatrix4(this.root.matrixWorld);
+    camera.getWorldPosition(_faceC);
+    const dist = _faceC.distanceTo(_faceW);
+    if (dist < 1e-3) return;
+    const push = Math.min(FACE_PUSH, dist * 0.5); // never shove it past the camera
+    _faceW.addScaledVector(_faceC.sub(_faceW).divideScalar(dist), push);
+    this.faceSprite.position.copy(this.root.worldToLocal(_faceW));
+    const k = (dist - push) / dist;
+    this.faceSprite.scale.set(FACE_H * BARER.aspect * k, FACE_H * k, 1);
   }
 
   _buildBar() {
@@ -139,8 +185,12 @@ export class Enemy {
 
   setPos(x, z) { this.pos.x = x; this.pos.z = z; this.root.position.set(x, 0, z); }
 
-  // Called by player combat.
-  takeHit(dmg, fromPos, heavy) {
+  // Called by player combat. `poiseDmg` chips the guard; jabs deal little and NEVER stun
+  // on their own, so mashing jab at a winding-up enemy just eats the strike. A Haymaker /
+  // Shove chunks poise, and when it empties the guard breaks: a knockdown/stagger plus a
+  // punish window (this.vulnT) during which hits land for VULN_MULT extra — that's the
+  // reward for opening with a heavy instead of spamming jab.
+  takeHit(dmg, fromPos, heavy, poiseDmg = 0) {
     if (this.dead || this.state === 'downed') return { killed: false };
     const dx = this.pos.x - fromPos.x, dz = this.pos.z - fromPos.z;
     const d = Math.hypot(dx, dz) || 1;
@@ -157,11 +207,22 @@ export class Enemy {
       return { killed: false, invuln: true };
     }
 
+    // a guard-broken enemy is wide open — everything bites harder in the punish window
+    if (this.vulnT > 0) dmg *= VULN_MULT;
+
     this.hp -= dmg;
     this.flash = 1;
     this.barShow = 2.2;
     const kb = (heavy ? 7.5 : 3.2) * this.arch.knockRes;
     this.vel.x += (dx / d) * kb; this.vel.z += (dz / d) * kb;
+
+    // chip the guard; emptying it breaks it open (and resets the pool)
+    let broke = false;
+    if (poiseDmg > 0) {
+      this.poise -= poiseDmg;
+      this.poiseRegenT = 0;
+      if (this.poise <= 0) { this.poise = this.maxPoise; broke = true; }
+    }
 
     // Barer never "dies" the normal way — at 0 HP he drops into a downed grab pose and
     // the director takes over for the interactive finisher.
@@ -171,11 +232,21 @@ export class Enemy {
       return { killed: false, barerDown: true };
     }
     if (this.hp <= 0) { this._die(dx / d, dz / d); return { killed: true, score: this.arch.score }; }
-    // interrupt & stagger
-    if (heavy || this.state === 'windup' || Math.random() < 0.5) {
+
+    // Reaction:
+    //   guard break     -> knockdown (heavy) / hard stagger, and open the punish window
+    //   heavy, no break  -> a brief flinch (a committed blow still rocks them)
+    //   jab, no break    -> NOTHING: they keep advancing and keep attacking — the risk
+    if (broke) {
       this.state = (heavy && !this.boss) ? 'knockdown' : 'stagger';
-      this.timer = (this.state === 'knockdown') ? 1.1 : 0.32;
+      this.timer = (this.state === 'knockdown') ? 1.15 : 0.75;
+      this.vulnT = this.timer + 0.45;   // window outlasts the stun a touch, so follow-ups land
       this.hasDealt = false;
+      if (this.isBarer) this.setFace('default');
+      return { killed: false, poiseBreak: true };
+    }
+    if (heavy) {
+      this.state = 'stagger'; this.timer = 0.3; this.hasDealt = false;
       if (this.isBarer) this.setFace('default');
     }
     return { killed: false };
@@ -201,6 +272,7 @@ export class Enemy {
 
   update(dt, ctx) {
     const time = ctx.time;
+    if (this.faceSprite) this._updateBarerFace(ctx.camera);
     // flash decay
     if (this.flash > 0) {
       this.flash = Math.max(0, this.flash - dt * 4);
@@ -220,6 +292,28 @@ export class Enemy {
       this.root.rotation.y = this.facing + q;
       this.root.position.set(this.pos.x, this.groundY, this.pos.z);
       return;
+    }
+
+    // guard state: run down the punish window, and refill poise after a lull so stray
+    // jabs never bank a free break
+    if (this.vulnT > 0) this.vulnT = Math.max(0, this.vulnT - dt);
+    this.poiseRegenT += dt;
+    if (this.poise < this.maxPoise && this.poiseRegenT > POISE_REGEN_DELAY) {
+      this.poise = Math.min(this.maxPoise, this.poise + POISE_REGEN * dt);
+    }
+    // vulnerable glow: a warm pulse marking the opening. The red hit-flash owns the
+    // emissive while it's active, so only paint (and clear) the tint once flash is spent.
+    if (this.flash <= 0) {
+      if (this.vulnT > 0) {
+        const pulse = 0.3 + 0.22 * Math.sin(time * 14);
+        this.mats.coat.emissive.setRGB(pulse, pulse * 0.82, pulse * 0.2);
+        this.mats.skin.emissive.setRGB(pulse * 0.8, pulse * 0.66, pulse * 0.16);
+        this._glow = true;
+      } else if (this._glow) {
+        this.mats.coat.emissive.setRGB(0, 0, 0);
+        this.mats.skin.emissive.setRGB(0, 0, 0);
+        this._glow = false;
+      }
     }
 
     // apply knockback velocity

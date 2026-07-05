@@ -41,8 +41,8 @@ export class MapGen {
 
   pickTheme(depth) {
     const r = this.rng;
-    // Every 4th room: the Great Shul (boss room)
-    if (depth > 0 && depth % 4 === 0) return 'shul';
+    // Every 3rd room: the Great Shul (boss room)
+    if (depth > 0 && depth % 3 === 0) return 'shul';
     if (depth >= 14) return r.weighted([['crypt', 5], ['cellar', 3], ['library', 1]]);
     if (depth >= 9) return r.weighted([['cellar', 3], ['library', 3], ['beis_medrash', 2], ['hall', 2]]);
     if (depth >= 4) return r.weighted([['beis_medrash', 4], ['library', 3], ['dining', 2], ['hall', 2]]);

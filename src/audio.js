@@ -221,6 +221,27 @@ export class AudioEngine {
     n.start(t); n.stop(t + 0.1);
   }
 
+  // Sharp "crack" the moment an enemy's guard breaks open — a bright metallic snap and
+  // a quick two-note down-chime, so the punish window announces itself over the hit thud.
+  guardBreak() {
+    if (!this.ready) return;
+    const t = this._now();
+    // metallic snap
+    const n = this._noiseSrc();
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 2.2;
+    const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.001, 0.4, 0.15);
+    n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus); ng.connect(this.reverb);
+    n.start(t); n.stop(t + 0.2);
+    // a bright "you cracked it" down-chime
+    [midi(88), midi(81)].forEach((f, i) => {
+      const o = this.ctx.createOscillator(); o.type = 'square'; o.frequency.value = f;
+      const g = this.ctx.createGain(); const st = t + i * 0.06;
+      this._env(g.gain, st, 0.002, 0.16, 0.2);
+      o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+      o.start(st); o.stop(st + 0.26);
+    });
+  }
+
   enemyHurt(pitch = 1) {
     if (!this.ready) return;
     const t = this._now();

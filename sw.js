@@ -1,21 +1,68 @@
 // Barer Brawl service worker — keeps returning players on the freshly deployed
-// build instead of a stale, browser-cached one.
+// build instead of a stale, browser-cached one, and (since the PWA conversion)
+// makes the installed app fully playable offline.
 //
 // Strategy: NETWORK-FIRST for every same-origin GET. On each load we fetch the
 // real file from the network with `cache: 'reload'`, which bypasses the browser's
 // HTTP disk cache. So the moment a new version is deployed, the next page load
 // picks it up — no more running last visit's `main.js` against this visit's
-// `director.js`. We still mirror successful responses into Cache Storage, so once
-// the game has loaded it keeps working even if the network drops.
+// `director.js`. We still mirror successful responses into Cache Storage, and at
+// install time we PRECACHE the whole app shell below, so the game works offline
+// even for files the player never happened to load online.
 //
 // GitHub Pages sends `Cache-Control: max-age=600`, so without this a returning
 // player could run up to ~10 minutes of stale code; this closes that window.
 
-const CACHE_NAME = 'barer-brawl-v1';
+const CACHE_NAME = 'barer-brawl-v2';
 
-self.addEventListener('install', () => {
-  // Don't wait for every other tab to close before this worker takes over.
-  self.skipWaiting();
+// The complete app shell. Keep in sync when adding top-level files — a missing
+// entry only degrades offline-before-first-fetch of that file, since the fetch
+// handler mirrors everything it serves anyway.
+const PRECACHE = [
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './css/style.css',
+  './vendor/three.module.js',
+  './src/assets.js',
+  './src/audio.js',
+  './src/characters.js',
+  './src/collide.js',
+  './src/cutscene.js',
+  './src/director.js',
+  './src/enemy.js',
+  './src/finisher.js',
+  './src/input.js',
+  './src/main.js',
+  './src/mapgen.js',
+  './src/pathfind.js',
+  './src/player.js',
+  './src/props.js',
+  './src/rng.js',
+  './src/roombuilder.js',
+  './src/textures.js',
+  './src/touch.js',
+  './src/ui.js',
+  './assets/barer-default.png',
+  './assets/barer-attack1.png',
+  './assets/barer-attack2.png',
+  './assets/barer-damaged.png',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/icon-maskable-192.png',
+  './icons/icon-maskable-512.png',
+  './icons/apple-touch-icon.png',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    // `reload` bypasses the HTTP cache so the precache is the deployed bytes,
+    // not whatever the browser had lying around.
+    await cache.addAll(PRECACHE.map((u) => new Request(u, { cache: 'reload' })));
+    // Don't wait for every other tab to close before this worker takes over.
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
@@ -46,8 +93,14 @@ self.addEventListener('fetch', (event) => {
       return fresh;
     } catch (err) {
       // Offline / network error: fall back to the last copy we cached, if any.
-      const cached = await caches.match(req);
+      const cached = await caches.match(req, { ignoreSearch: req.mode === 'navigate' });
       if (cached) return cached;
+      // An installed app launched offline navigates to start_url — make sure
+      // that always resolves to the shell even if the exact URL wasn't cached.
+      if (req.mode === 'navigate') {
+        const shell = await caches.match('./index.html');
+        if (shell) return shell;
+      }
       throw err;
     }
   })());

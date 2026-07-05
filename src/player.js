@@ -13,6 +13,22 @@ const BACKPEDAL = 0.55;
 // A punch that lands in the enemy's head band (see Enemy.headY/headR) hits this much harder.
 const HEADSHOT_MULT = 1.8;
 
+// ---- Poise damage (guard-breaking) -----------------------------------------
+// How much of an enemy's guard each strike chips (see Enemy poise / VULN_MULT). A jab
+// barely dents it, so jab-spam alone won't crack a guard before poise refills — the
+// Haymaker and Shove are the openers, and a headshot chips extra so aim pays twice.
+const JAB_POISE = 7;
+const HEAVY_POISE = 46;   // a haymaker breaks a rank-and-file bochur in one, chunks the big ones
+const SHOVE_POISE = 38;   // the two-handed shove cracks a whole crowd's guard at once
+
+// ---- Rapid-jab throttle -----------------------------------------------------
+// A jab that starts within JAB_CHAIN_WINDOW of the previous one counts as "back-to-back"
+// (the buffered auto-combo fires ~0.3s apart, well inside this). After the 2nd such jab a
+// short recovery (JAB_PAIR_CD) locks the next one out — enough to break the machine-gun
+// rhythm and invite a heavy/shove, but small enough that a paced jab is never throttled.
+const JAB_CHAIN_WINDOW = 0.42;
+const JAB_PAIR_CD = 0.35;
+
 // ---- Wall-hugging penalty --------------------------------------------------
 // Backing into a wall removes the flank threat, so cornering yourself must cost
 // you instead. We sample "enclosure" by probing 8 compass points this far out;
@@ -93,6 +109,12 @@ export class Player {
     this.shoveCd = 0;
     this.shove = null;              // {t, dur, strikeAt, dealt} — two-handed push
     this.buffered = null;
+    // rapid-jab throttle: two jabs thrown back-to-back earn a short recovery, so you
+    // can't machine-gun them. jabChain counts jabs inside jabChainT's rolling window;
+    // pausing (window lapses) resets it, so deliberately-spaced jabs are never penalized.
+    this.jabCd = 0;
+    this.jabChain = 0;
+    this.jabChainT = 0;
 
     // fists view-model, rendered in a SEPARATE scene/pass so the detailed hands
     // self-occlude correctly (proper depth among their own parts) yet still draw
@@ -139,6 +161,7 @@ export class Player {
     this.pos.x = x; this.pos.z = z; this.yaw = yaw; this.pitch = 0;
     this.hp = this.maxHp; this.dead = false; this.invuln = 0; this.sinceDamage = 99;
     this.combo = 0; this.attack = null; this.shove = null; this.shake = 0; this._deadT = 0;
+    this.buffered = null; this.jabCd = 0; this.jabChain = 0; this.jabChainT = 0;
     this.yOff = 0; this.vy = 0; this.grounded = true; this.vel.x = 0; this.vel.z = 0;
     this.nudge = null;
     this.cornered = 0; this.pinnedMult = 1; this._anchorStuck = 0; this._heartT = 0;
@@ -275,6 +298,9 @@ export class Player {
       if (type === 'light' && this.attack.t / this.attack.dur > 0.45) this.buffered = 'light';
       return;
     }
+    // jab held off by the post-pair recovery: remember the intent so it fires the instant
+    // the lockout clears (spam stays responsive) rather than dropping the input.
+    if (type === 'light' && this.jabCd > 0) { this.buffered = 'light'; return; }
     const hand = this.nextHand;
     this.nextHand = hand === 'right' ? 'left' : 'right';
     if (type === 'heavy') {
@@ -282,6 +308,9 @@ export class Player {
       this.attack = { type, t: 0, dur: 0.68, strikeAt: 0.34, hand: 'right', dealt: false };
       this.heavyCd = 1.2;
     } else {
+      // count this jab into the rapid chain (fresh chain if the window has lapsed)
+      this.jabChain = this.jabChainT > 0 ? this.jabChain + 1 : 1;
+      this.jabChainT = JAB_CHAIN_WINDOW;
       this.attack = { type, t: 0, dur: 0.3, strikeAt: 0.11, hand, dealt: false };
     }
   }
@@ -294,8 +323,9 @@ export class Player {
     const cosCone = Math.cos(heavy ? 0.42 : 0.62);
     const baseDmg = heavy ? 34 : 11;
     const eyeY = EYE + this.yOff;
+    const basePoise = heavy ? HEAVY_POISE : JAB_POISE;
     const f = this.forwardXZ();
-    let any = false, kills = 0, hitPos = null, anyHead = false, headPos = null;
+    let any = false, kills = 0, hitPos = null, anyHead = false, headPos = null, anyBreak = false, breakPos = null;
     for (const e of ctx.enemies) {
       if (e.dead) continue;
       const dx = e.pos.x - this.pos.x, dz = e.pos.z - this.pos.z;
@@ -308,13 +338,17 @@ export class Player {
       // the head (crosshair kept high/level) for a headshot; a body hit is normal damage.
       const aimY = eyeY + dist * Math.tan(this.pitch);
       const head = Math.abs(aimY - e.headY) <= e.headR;
-      const res = e.takeHit(head ? baseDmg * HEADSHOT_MULT : baseDmg, this.pos, heavy);
+      // a clean shot to the kop chips extra guard too — aim breaks poise faster
+      const poise = head ? basePoise * HEADSHOT_MULT : basePoise;
+      const res = e.takeHit(head ? baseDmg * HEADSHOT_MULT : baseDmg, this.pos, heavy, poise);
       any = true; hitPos = e.pos;
       if (head) { anyHead = true; headPos = e.pos; }
+      if (res.poiseBreak) { anyBreak = true; breakPos = e.pos; }
       ctx.audio.hit(heavy, head ? 1.5 : 1);
       if (e.isBarer) ctx.audio.barerSquawk();   // Chaim Barer squawks like a struck ostrich
       if (res.killed) { kills++; if (this.onKill) this.onKill({ score: res.score, pos: e.pos, type: e.type }); }
     }
+    if (anyBreak) ctx.audio.guardBreak();
     // a punch that reaches a window's glass cracks it (jab) or shatters it (haymaker);
     // a strike on already-cracked glass always shatters. Purely cosmetic — the wall
     // behind stays solid — so it never feeds the combo, just its own contact feedback.
@@ -336,10 +370,10 @@ export class Player {
     if (any) {
       this.combo++; this.comboTimer = 2.2;
       ctx.audio.combo(this.combo);
-      if (this.onHit) this.onHit({ combo: this.combo, heavy, kills, pos: hitPos, head: anyHead, headPos });
+      if (this.onHit) this.onHit({ combo: this.combo, heavy, kills, pos: hitPos, head: anyHead, headPos, poiseBreak: anyBreak, breakPos });
       if (this.onCombo) this.onCombo(this.combo);
       this.recoil = heavy ? 1 : 0.5;
-      this.shake = Math.min(1, this.shake + (heavy ? 0.35 : 0.12));
+      this.shake = Math.min(1, this.shake + (heavy ? 0.35 : 0.12) + (anyBreak ? 0.18 : 0));
     } else if (hitWindow) {
       // solid contact on glass: a jolt back through the arm, but no combo/whoosh
       this.recoil = Math.max(this.recoil, heavy ? 0.8 : 0.4);
@@ -359,7 +393,7 @@ export class Player {
   _resolveShove(ctx) {
     ctx.audio.whoosh(true);
     const f = this.forwardXZ();
-    let any = false;
+    let any = false, anyBreak = false, breakPos = null;
     for (const e of ctx.enemies) {
       if (e.dead) continue;
       const dx = e.pos.x - this.pos.x, dz = e.pos.z - this.pos.z;
@@ -367,18 +401,21 @@ export class Player {
       if (dist > 3.4 + e.radius) continue;                    // reaches further than a punch
       const nd = dist || 1;
       if ((dx / nd) * f.x + (dz / nd) * f.z < -0.4) continue; // wide arc — catches a whole crowd, not just dead ahead
-      e.takeHit(4, this.pos, true);
+      // little direct damage, but a big chunk of guard: the shove is the crowd opener —
+      // one heave cracks a whole rank open (takeHit owns the resulting stagger/knockdown).
+      const res = e.takeHit(4, this.pos, true, SHOVE_POISE);
       if (e.isBarer) ctx.audio.barerSquawk();                 // Chaim Barer squawks like a struck ostrich
       e.vel.x += (dx / nd) * 13 * e.arch.knockRes;            // launches them well back to open space
       e.vel.z += (dz / nd) * 13 * e.arch.knockRes;
-      if (!e.dead && !e.boss) { e.state = 'stagger'; e.timer = 0.5; }
+      if (res.poiseBreak) { anyBreak = true; breakPos = e.pos; }
       any = true;
     }
+    if (anyBreak) ctx.audio.guardBreak();
     // camera nudge from the effort of the push (more when it connects)
     this.recoil = Math.max(this.recoil, any ? 0.6 : 0.35);
     if (any) {
-      this.shake = Math.min(1, this.shake + 0.16);
-      if (this.onHit) this.onHit({ combo: this.combo, shove: true });
+      this.shake = Math.min(1, this.shake + 0.16 + (anyBreak ? 0.12 : 0));
+      if (this.onHit) this.onHit({ combo: this.combo, shove: true, poiseBreak: anyBreak, breakPos });
     }
   }
 
@@ -389,6 +426,8 @@ export class Player {
     if (this.dead) this._deadT += dt;
     this.heavyCd = Math.max(0, this.heavyCd - dt);
     this.shoveCd = Math.max(0, this.shoveCd - dt);
+    this.jabCd = Math.max(0, this.jabCd - dt);
+    if (this.jabChainT > 0) this.jabChainT = Math.max(0, this.jabChainT - dt);
 
     // regen slowly when out of combat
     if (!this.dead && this.sinceDamage > 6 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 3.2 * dt);
@@ -474,6 +513,8 @@ export class Player {
       if (inp.consumeLight()) this.startAttack('light');
       if (inp.consumeHeavy() && this.heavyCd <= 0) this.startAttack('heavy');
       if (inp.consumeShove() && this.shoveCd <= 0) this._startShove();
+      // a jab queued during the post-pair recovery fires the moment the lockout clears
+      if (this.jabCd <= 0 && this.buffered && !this.attack) { const b = this.buffered; this.buffered = null; this.startAttack(b); }
     }
 
     // combo timer
@@ -484,8 +525,12 @@ export class Player {
       const a = this.attack; a.t += dt;
       if (!a.dealt && a.t >= a.strikeAt) { a.dealt = true; this._resolveAttack(ctx); }
       if (a.t >= a.dur) {
+        const wasJab = a.type === 'light';
         this.attack = null;
-        if (this.buffered) { const b = this.buffered; this.buffered = null; this.startAttack(b); }
+        // a rapid pair of jabs earns a short recovery — no instant third (weave a heavy/shove).
+        // Clearing the window too guarantees the jab after the lockout starts a fresh chain.
+        if (wasJab && this.jabChain >= 2) { this.jabCd = JAB_PAIR_CD; this.jabChain = 0; this.jabChainT = 0; }
+        if (this.buffered && this.jabCd <= 0) { const b = this.buffered; this.buffered = null; this.startAttack(b); }
       }
     }
 
