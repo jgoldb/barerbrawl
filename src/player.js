@@ -1,9 +1,19 @@
 // First-person player: camera rig, view-model fists, movement, combat, health.
 import * as THREE from 'three';
 import { buildFists } from './characters.js';
+import { MAT } from './assets.js';
 import { resolveCircle, surfaceHeight } from './collide.js';
 
 const EYE = 1.66;
+
+// ---- Sitting on chairs/benches ---------------------------------------------
+// The player can sit on a seat they're looking at within reach (WoW-style). Detection
+// is aim + range + free-seat availability; the reticle shows enabled/disabled. Any
+// movement (or an action, or taking a hit) stands them back up.
+const SIT_HOVER_MAX = 4.2;    // start showing the sit cursor within this look-range
+const SIT_RANGE = 2.6;        // must be at least this close for the seat to be usable
+const SIT_AIM_DOT = 0.55;     // crosshair must fall roughly on the seat (cos of the cone)
+const SIT_EYE_ABOVE_SEAT = 0.82; // seated eye height above the seat surface
 // How far above the feet a ledge may be to still count as walk-over / land-on. Small,
 // so benches (0.55) and tables (0.96) each need a real jump, but landings are forgiving.
 const STEP_CLEAR = 0.15;
@@ -21,24 +31,29 @@ const JAB_POISE = 7;
 const HEAVY_POISE = 46;   // a haymaker breaks a rank-and-file bochur in one, chunks the big ones
 const SHOVE_POISE = 38;   // the two-handed shove cracks a whole crowd's guard at once
 
+// ---- Back-strike penalty ---------------------------------------------------
+// A hit landing behind you catches you flat-footed — you can't roll with a blow you
+// never saw, so it lands 30% harder. Judged from the attacker's position vs. your
+// facing in takeDamage; stacks on top of the wall-pinned multiplier (B).
+const BEHIND_MULT = 1.3;
+
 // ---- Rapid-jab throttle -----------------------------------------------------
 // A jab that starts within JAB_CHAIN_WINDOW of the previous one counts as "back-to-back"
 // (the buffered auto-combo fires ~0.3s apart, well inside this). After the 2nd such jab a
 // short recovery (JAB_PAIR_CD) locks the next one out — enough to break the machine-gun
 // rhythm and invite a heavy/shove, but small enough that a paced jab is never throttled.
 const JAB_CHAIN_WINDOW = 0.42;
-const JAB_PAIR_CD = 0.35;
+const JAB_PAIR_CD = 0.5;
 
 // ---- Wall-hugging penalty --------------------------------------------------
-// Backing into a wall removes the flank threat, so cornering yourself must cost
-// you instead. We sample "enclosure" by probing 8 compass points this far out;
-// a point inside a full-height wall counts as blocked. Open floor ~0, a flat wall
-// behind you ~3/8, a corner 5+/8. Furniture doesn't count (see CORNER_WALL_TOP) —
-// tables and benches are vault-over escapes, not traps.
+// Backing your flank against something solid removes the threat of being surrounded,
+// so cornering yourself must cost you instead. We sample "enclosure" by probing 8
+// compass points this far out; a point inside anything that would actually block your
+// movement counts. ANY solid obstacle shields your back — a wall, a bookshelf, a
+// window's wall, the aron kodesh, a pillar, a table, a bench — so all of them count
+// (see _enclosure, which uses the same step-over test as collision). Open floor ~0,
+// a flat obstacle behind you ~3/8, a corner 5+/8.
 const CORNER_PROBE = 0.85;
-// Only true walls (and full-height obstacles) corner you — furniture is a step-over
-// escape route, not a trap, so anything shorter than this doesn't count as enclosure.
-const CORNER_WALL_TOP = 1.8;
 // The meter only builds above this blocked-fraction — a flat wall at your back is
 // enough, but you must also be STUCK (see below), so a wall to your side while you
 // run a hall never triggers it.
@@ -83,10 +98,25 @@ export class Player {
     // not a teleport. Null when idle. See nudgeBy().
     this.nudge = null;
 
+    // sitting: null when standing, else { seat, seatX, seatZ, eyeY }. sitState/sitSeat
+    // drive the reticle each frame while standing (none | enabled | disabled); sitReturn
+    // is the standing spot to drop back to when they get up.
+    this.sitting = null;
+    this.sitState = 'none';
+    this.sitSeat = null;
+    this.sitReturn = null;
+
     this.maxHp = 100; this.hp = 100;
     this.dead = false;
     this.invuln = 0;
     this.sinceDamage = 99;
+    // brief window after an NPC flings the player (knockBack/knockOff) during which
+    // slamming into a bookshelf counts as "knocked into it" and rains sefarim down.
+    this.knockedT = 0;
+
+    // leg-binding slow debuff (a mekubal's strike): while slowT > 0 the movement speed
+    // is scaled by slowFactor. Refreshes rather than stacks (see applySlow).
+    this.slowT = 0; this.slowFactor = 1;
 
     // wall-hug pressure: 0..1 meter that ramps while you're wedged against a wall
     // with nowhere to retreat, and drains fast in the open. Drives chip damage (A),
@@ -96,6 +126,7 @@ export class Player {
     this._anchor = { x: 0, z: 0 };  // where we last "made progress" from
     this._anchorStuck = 0;          // time lingering near that anchor
     this._heartT = 0;               // heartbeat SFX countdown
+    this._crushT = 0;               // wall-crush beat countdown (SFX + flash + shake)
 
     this.bob = 0; this.bobActive = 0;
     this.shake = 0; this.pitchPunch = 0; this.recoil = 0;
@@ -116,6 +147,13 @@ export class Player {
     this.jabChain = 0;
     this.jabChainT = 0;
 
+    // shekels: a pocketful of coins (max 3). One drops off each fallen boss; with at least
+    // one in hand the player can toss it (Q) as a lure that pulls the whole room off them.
+    this.shekels = 0;
+    this.maxShekels = 3;
+    this.toss = null;          // {t, dur, strikeAt, released} — the wind-up-and-throw animation
+    this.onToss = null;        // (info) fired at the release frame so the world spawns the coin
+
     // fists view-model, rendered in a SEPARATE scene/pass so the detailed hands
     // self-occlude correctly (proper depth among their own parts) yet still draw
     // over the world. Own lights keep them lit consistently as the camera moves.
@@ -135,6 +173,19 @@ export class Player {
     vRim.position.set(0.8, 0.1, -1.0); vRim.target.position.set(0, -0.2, -0.5);
     this.viewRig.add(vRim, vRim.target);
 
+    // a shekel that materialises in the throwing (right) hand during a toss, then vanishes
+    // the instant it leaves the fingers (the world takes over the airborne coin). Parented
+    // to the right fist so it rides the hand through the whole wind-up. Hidden at rest.
+    const coin = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.075, 0.075, 0.02, 18),
+      [MAT.shekelEdge, MAT.shekelFace, MAT.shekelFace],   // struck Hebrew face on the caps
+    );
+    coin.rotation.set(0.5, 0, 0.5);           // tilt so the minted face angles toward the eye
+    coin.position.set(0.0, 0.17, -0.26);      // held up and forward of the fingertips, clear of the knuckles
+    coin.visible = false;
+    this.throwCoin = coin;
+    this.fistR.add(coin);
+
     // rest transforms (both position AND rotation, so the baked pose survives animation)
     this._restL = this.fistL.position.clone();
     this._restR = this.fistR.position.clone();
@@ -152,6 +203,9 @@ export class Player {
     this.onDamage = null;   // (info)
     this.onCombo = null;    // (n)
     this.onDeath = null;
+    this.onKnockback = null; // (info) — a bulvan shoved the player back
+    this.onSlow = null;      // (info) — a mekubal's binding took hold (rising edge)
+    this.onCornerCrush = null; // (sev) — a wall-crush beat while cornered chip damage lands
     this._footPhase = 0;   // continuous stride phase (wraps at 2π, seamless for sin/cos)
     this._stepPhase = 0;   // separate accumulator for footstep sfx (two steps per stride)
     this._moving = false;
@@ -162,8 +216,13 @@ export class Player {
     this.hp = this.maxHp; this.dead = false; this.invuln = 0; this.sinceDamage = 99;
     this.combo = 0; this.attack = null; this.shove = null; this.shake = 0; this._deadT = 0;
     this.buffered = null; this.jabCd = 0; this.jabChain = 0; this.jabChainT = 0;
+    this.knockedT = 0;
+    this.shekels = 0; this.toss = null; if (this.throwCoin) this.throwCoin.visible = false;
     this.yOff = 0; this.vy = 0; this.grounded = true; this.vel.x = 0; this.vel.z = 0;
     this.nudge = null;
+    this.slowT = 0; this.slowFactor = 1;
+    if (this.sitting && this.sitting.seat) this.sitting.seat.occupant = null;
+    this.sitting = null; this.sitState = 'none'; this.sitSeat = null; this.sitReturn = null;
     this.cornered = 0; this.pinnedMult = 1; this._anchorStuck = 0; this._heartT = 0;
     this._anchor.x = x; this._anchor.z = z;
     this._sync();
@@ -187,8 +246,17 @@ export class Player {
 
   takeDamage(dmg, srcPos) {
     if (this.dead || this.invuln > 0) return;
+    if (this.sitting) this._standUp();   // a struck bochur springs to his feet
     // (B) pinned against a wall — you can't roll with the hit, so it lands harder
     dmg *= this.pinnedMult;
+    // Struck from behind — caught flat-footed, the blow lands 30% harder. `toSrc`
+    // is the direction to the attacker; a negative dot with your facing means the
+    // hit came from behind you.
+    if (srcPos) {
+      const f = this.forwardXZ();
+      const tx = srcPos.x - this.pos.x, tz = srcPos.z - this.pos.z;
+      if (tx * f.x + tz * f.z < 0) dmg *= BEHIND_MULT;
+    }
     this.hp -= dmg;
     this.invuln = 0.45;
     this.sinceDamage = 0;
@@ -201,7 +269,55 @@ export class Player {
     if (this.hp <= 0) { this.hp = 0; this.dead = true; if (this.onDeath) this.onDeath(); }
   }
 
+  // A sefer knocked off a shelf lands on the player: a little damage plus a jolt and a
+  // small shove out from under the falling books. Deliberately BYPASSES the combat i-frames
+  // so a cascade of several books each chips a bit (each book strikes only once — see
+  // Bookshelf.update), and flags the hit (info.book) so the HUD flashes without the usual
+  // hurt grunt (the book's own thump SFX covers it).
+  hurtByFallingBook(dmg, srcPos) {
+    if (this.dead) return;
+    if (this.sitting) this._standUp();
+    this.hp -= dmg;
+    this.sinceDamage = 0;
+    this.shake = Math.min(1.4, this.shake + 0.3);
+    if (srcPos) {
+      const dx = this.pos.x - srcPos.x, dz = this.pos.z - srcPos.z, d = Math.hypot(dx, dz) || 1;
+      this.pos.x += (dx / d) * 0.12; this.pos.z += (dz / d) * 0.12;
+    }
+    if (this.onDamage) this.onDamage({ dmg, hp: this.hp, book: true });
+    if (this.hp <= 0) { this.hp = 0; this.dead = true; if (this.onDeath) this.onDeath(); }
+  }
+
   heal(a) { this.hp = Math.min(this.maxHp, this.hp + a); }
+
+  // Pocket a shekel; returns false (no-op) when already carrying the max of three.
+  addShekel() {
+    if (this.shekels >= this.maxShekels) return false;
+    this.shekels++;
+    return true;
+  }
+
+  // Begin a toss: consume one shekel and start the wind-up-and-throw arm animation. The
+  // coin appears in the hand now and is released (spawned into the world) at strikeAt.
+  _startToss(ctx) {
+    if (this.dead || this.toss || this.shekels <= 0 || this.attack || this.shove || this.sitting) return;
+    this.shekels--;
+    this.toss = { t: 0, dur: 0.5, strikeAt: 0.26, released: false };
+    if (this.throwCoin) this.throwCoin.visible = true;
+    ctx.audio.coinToss();
+  }
+
+  // The release frame: hide the held coin and hand off a launch spec (origin + aim) to the
+  // world so the director can spawn the airborne, wall-bouncing lure.
+  _releaseToss(ctx) {
+    if (this.throwCoin) this.throwCoin.visible = false;
+    const f = this.forwardXZ();
+    const originY = EYE + this.yOff - 0.1;   // roughly the throwing hand's height
+    if (this.onToss) this.onToss({
+      x: this.pos.x, z: this.pos.z, y: originY,
+      dirX: f.x, dirZ: f.z, pitch: this.pitch,
+    });
+  }
 
   // Slide the player by (dx,dz) smoothly over `dur` seconds instead of snapping.
   // Applied in update() before collision, so the glide still respects walls; kept
@@ -210,10 +326,14 @@ export class Player {
     this.nudge = { dx, dz, dur, t: 0, done: 0 };
   }
 
-  // Fraction (0..1) of 8 probe directions that land inside a wall you can't step
-  // over. Cheap point-in-box test at CORNER_PROBE out — flush against a wall you're
-  // held ~radius off, so a point 0.85 out lands well inside it.
-  _enclosure(colliders) {
+  // Fraction (0..1) of 8 probe directions that land inside something that would block
+  // movement at the player's feet. Cheap point-in-box test at CORNER_PROBE out — flush
+  // against an obstacle you're held ~radius off, so a point 0.85 out lands well inside it.
+  // Uses the SAME step-over rule as resolveCircle (a box whose top is within STEP_CLEAR
+  // of your feet is passable), so anything genuinely solid at your back — wall, bookshelf,
+  // window's wall, aron kodesh, pillar, table, bench — counts, while a surface you're
+  // standing on does not.
+  _enclosure(colliders, feetY) {
     let blocked = 0;
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
@@ -221,8 +341,8 @@ export class Player {
       const z = this.pos.z + Math.sin(a) * CORNER_PROBE;
       for (let j = 0; j < colliders.length; j++) {
         const b = colliders[j];
-        // only full-height walls corner you — benches/tables are vault-over escapes
-        if (b.top !== undefined && b.top < CORNER_WALL_TOP) continue;
+        // skip anything you can step over or are standing on — it isn't shielding your back
+        if (b.top !== undefined && b.top - feetY <= STEP_CLEAR) continue;
         if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) { blocked++; break; }
       }
     }
@@ -231,7 +351,9 @@ export class Player {
 
   // Ramp the wall-hug meter, then cash it out as chip damage (A) and a damage-taken
   // multiplier (B). Building requires BOTH enclosure and being stuck-in-place, so a
-  // corridor (walls beside you, but you keep advancing) never triggers it.
+  // corridor (walls beside you, but you keep advancing) never triggers it. Only a
+  // live fight (ctx.inCombat) can build it — cornering is a threat only when there's
+  // a flank to give up, so exploring/parking against a wall between rooms is free.
   _updateCornered(dt, ctx) {
     // net-progress tracking: getting far enough from the anchor = you're moving on
     const dax = this.pos.x - this._anchor.x, daz = this.pos.z - this._anchor.z;
@@ -241,9 +363,10 @@ export class Player {
       this._anchorStuck += dt;
     }
     const stuck = this._anchorStuck > CORNER_STUCK_GRACE;
-    const enc = this._enclosure(ctx.colliders);
+    // Skip the 8-point probe entirely out of combat; the meter just decays below.
+    const enc = ctx.inCombat ? this._enclosure(ctx.colliders, this.yOff) : 0;
 
-    if (!this.dead && stuck && enc >= CORNER_ENCLOSE_MIN) {
+    if (!this.dead && ctx.inCombat && stuck && enc >= CORNER_ENCLOSE_MIN) {
       const over = (enc - CORNER_ENCLOSE_MIN) / (1 - CORNER_ENCLOSE_MIN); // 0..1, corner > wall
       const rate = (0.7 + 0.9 * over) / CORNER_FILL;
       this.cornered = Math.min(1, this.cornered + rate * dt);
@@ -255,12 +378,22 @@ export class Player {
     this.pinnedMult = 1 + (CORNER_PIN_MULT - 1) * this.cornered;
 
     // (A) past the grace, the walls crush: chip damage applied straight to hp
-    // (bypasses i-frames), scaled from the threshold up, holding off regen.
+    // (bypasses i-frames), scaled from the threshold up.
     if (!this.dead && this.cornered > CORNER_HURT_AT) {
       const sev = (this.cornered - CORNER_HURT_AT) / (1 - CORNER_HURT_AT);
       this.hp -= CORNER_DPS * sev * dt;
       this.sinceDamage = 0;
+      // the drain never lands silently: on a beat (quickening as it worsens) the walls
+      // grind in — a crush SFX + red squeeze-flash (via onCornerCrush) and a camera jolt.
+      this._crushT -= dt;
+      if (this._crushT <= 0) {
+        this.shake = Math.min(1, this.shake + 0.12 + 0.3 * sev);
+        if (this.onCornerCrush) this.onCornerCrush(sev);
+        this._crushT = 0.52 - 0.24 * sev;   // 0.52s → 0.28s
+      }
       if (this.hp <= 0) { this.hp = 0; this.dead = true; if (this.onDeath) this.onDeath(); }
+    } else {
+      this._crushT = 0;   // next time damage begins, the first crush lands at once
     }
 
     // heartbeat telegraph, quickening as it worsens; starts inside the grace window
@@ -272,6 +405,20 @@ export class Player {
       }
     } else {
       this._heartT = 0;
+    }
+  }
+
+  // A slam into a bookshelf spills its sefarim. We only trip it on a real slam — sprinting
+  // into the shelf, or still reeling from an NPC's fling (knockedT) — so brushing past one
+  // at a walk does nothing. The shelf owns the cooldown, so one slam yields one cascade.
+  _checkShelfBump(ctx) {
+    if (this.dead) return;
+    const shelves = ctx.bookshelves;
+    if (!shelves || !shelves.length) return;
+    const slamming = (this._moving && ctx.input.sprinting()) || this.knockedT > 0;
+    if (!slamming) return;
+    for (const sh of shelves) {
+      if (sh.touched(this.pos.x, this.pos.z, this.radius + 0.08)) sh.bump(this.pos.x, this.pos.z, ctx.audio);
     }
   }
 
@@ -288,11 +435,110 @@ export class Player {
     const push = 6.8 * force;
     this.vel.x = (dx / d) * push; this.vel.z = (dz / d) * push;
     this.shake = Math.min(1.2, this.shake + 0.5);
+    this.knockedT = 0.5;   // flung by an NPC — a shelf we crash into now spills its sefarim
     if (dmg > 0) this.takeDamage(dmg, fromPos);
   }
 
-  startAttack(type) {
+  // A bulvan's blow that knocks the player bodily backward: a hard positional shove away
+  // from the attacker, eased via the scripted glide (see nudgeBy) so it slides — respecting
+  // walls — instead of teleporting, plus a camera jolt. Distinct from knockOff, which
+  // launches you off a perch into the air; this stays grounded and just puts you out of
+  // position. If the player is sitting, the strike already stood them up via takeDamage.
+  knockBack(fromPos, dist = 2.6) {
     if (this.dead) return;
+    const dx = this.pos.x - fromPos.x, dz = this.pos.z - fromPos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    this.nudgeBy((dx / d) * dist, (dz / d) * dist, 0.26);
+    this.shake = Math.min(1.4, this.shake + 0.7);
+    this.knockedT = 0.5;   // flung by an NPC — a shelf we crash into now spills its sefarim
+    if (this.onKnockback) this.onKnockback({ dist });
+  }
+
+  // A mekubal's binding that leaves the legs heavy: movement speed is scaled by `factor`
+  // for `dur` seconds. Refreshes the timer rather than stacking the slow deeper, and fires
+  // onSlow only on the rising edge (fresh binding) so the cue/telegraph plays once.
+  applySlow(factor = 0.5, dur = 2.6) {
+    if (this.dead) return;
+    const wasFree = this.slowT <= 0;
+    this.slowFactor = factor;
+    this.slowT = Math.max(this.slowT, dur);
+    if (wasFree && this.onSlow) this.onSlow({ dur });
+  }
+
+  // ---- Sitting --------------------------------------------------------------
+  // Find the seat the crosshair is on and classify the interaction: 'enabled' (a free
+  // seat in reach), 'disabled' (looking at a seat that's out of reach or taken), or
+  // 'none'. Sitting is gated to out-of-combat (ctx.canSit) so a fight is never paused
+  // by parking on a bench. Sets sitState/sitSeat for the reticle + the sit trigger.
+  _updateSitTarget(ctx) {
+    this.sitState = 'none'; this.sitSeat = null;
+    const seats = ctx.seats;
+    if (this.dead || !ctx.canSit || !seats || !seats.length) return;
+    const f = this.forwardXZ();
+    const eyeY = EYE + this.yOff;
+    let freeSeat = null, freeDist = Infinity, hoverAny = false;
+    for (const s of seats) {
+      const dx = s.x - this.pos.x, dz = s.z - this.pos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > SIT_HOVER_MAX) continue;
+      const nd = dist || 1;
+      if ((dx / nd) * f.x + (dz / nd) * f.z < SIT_AIM_DOT) continue;   // crosshair off the seat
+      // the aim ray must pass near the seat (empty) / the occupant's lap-to-head band
+      const aimY = eyeY + dist * Math.tan(this.pitch);
+      if (aimY < s.y - 0.5 || aimY > s.y + 1.35) continue;
+      hoverAny = true;
+      if (!s.occupant && dist < freeDist) { freeDist = dist; freeSeat = s; }
+    }
+    if (freeSeat && freeDist <= SIT_RANGE) { this.sitState = 'enabled'; this.sitSeat = freeSeat; }
+    else if (hoverAny) { this.sitState = 'disabled'; }
+  }
+
+  _sitDown(seat) {
+    if (this.sitting || this.dead || seat.occupant) return;
+    seat.occupant = this;
+    this.sitReturn = { x: this.pos.x, z: this.pos.z };   // valid standing spot to return to
+    this.pos.x = seat.x; this.pos.z = seat.z;
+    this.yaw = seat.ry + Math.PI;   // face out of the seat (forwardXZ is the yaw's opposite)
+    this.yOff = 0; this.vy = 0; this.grounded = true; this.vel.x = 0; this.vel.z = 0;
+    this.attack = null; this.shove = null; this.buffered = null; this.nudge = null;
+    this.bobActive = 0;
+    this.sitting = { seat, seatX: seat.x, seatZ: seat.z, eyeY: seat.y + SIT_EYE_ABOVE_SEAT };
+    this.sitState = 'none'; this.sitSeat = null;
+  }
+
+  _standUp() {
+    const s = this.sitting;
+    if (!s) return;
+    if (s.seat && s.seat.occupant === this) s.seat.occupant = null;
+    if (this.sitReturn) { this.pos.x = this.sitReturn.x; this.pos.z = this.sitReturn.z; }
+    this.sitting = null; this.sitReturn = null;
+  }
+
+  _updateSitting(dt, ctx) {
+    const inp = ctx.input;
+    // still free to look around while seated
+    const md = inp.consumeMouse();
+    if (!this.dead) this.look(md.dx, md.dy, inp.sensitivity);
+    // any of these stands you up (consume them all so nothing leaks into the next frame)
+    const mv = inp.moveVector();
+    const moved = mv.x !== 0 || mv.z !== 0;
+    const acted = inp.consumeJump() | inp.consumeLight() | inp.consumeHeavy() | inp.consumeShove() | inp.consumeSit();
+    if (this.dead || moved || acted) {
+      this._standUp();
+    } else {
+      // hold the seat: pin the body and keep the camera at the seated height
+      this.pos.x = this.sitting.seatX; this.pos.z = this.sitting.seatZ;
+      this.bobActive = 0;
+    }
+    this.shake = Math.max(0, this.shake - dt * 2.2);
+    this.recoil = Math.max(0, this.recoil - dt * 5);
+    this.pitchPunch = this.recoil * 0.05;
+    this._animateView(dt, ctx.time);
+    this._applyCamera(dt);
+  }
+
+  startAttack(type) {
+    if (this.dead || this.toss) return;   // committed to a throw — no jab/hook until it lands
     if (this.attack) {
       // buffer the next light attack for a combo
       if (type === 'light' && this.attack.t / this.attack.dur > 0.45) this.buffered = 'light';
@@ -367,6 +613,17 @@ export class Player {
         if (w.hit(heavy, ctx.audio)) hitWindow = true;
       }
     }
+    // a punch into a bookshelf rattles its loose sefarim off the top shelves (see Bookshelf).
+    // Like the glass it never feeds the combo — it's a solid contact with its own recoil.
+    let hitShelf = false;
+    if (ctx.bookshelves) {
+      const bReach = reach + 0.3;
+      for (const sh of ctx.bookshelves) {
+        if (!sh.inStrike(this.pos.x, this.pos.z, f, bReach, cosCone)) continue;
+        hitShelf = true;
+        sh.bump(this.pos.x, this.pos.z, ctx.audio);
+      }
+    }
     if (any) {
       this.combo++; this.comboTimer = 2.2;
       ctx.audio.combo(this.combo);
@@ -374,8 +631,8 @@ export class Player {
       if (this.onCombo) this.onCombo(this.combo);
       this.recoil = heavy ? 1 : 0.5;
       this.shake = Math.min(1, this.shake + (heavy ? 0.35 : 0.12) + (anyBreak ? 0.18 : 0));
-    } else if (hitWindow) {
-      // solid contact on glass: a jolt back through the arm, but no combo/whoosh
+    } else if (hitWindow || hitShelf) {
+      // solid contact on glass or a shelf: a jolt back through the arm, but no combo/whoosh
       this.recoil = Math.max(this.recoil, heavy ? 0.8 : 0.4);
       this.shake = Math.min(1, this.shake + (heavy ? 0.22 : 0.1));
     } else {
@@ -384,7 +641,7 @@ export class Player {
   }
 
   _startShove() {
-    if (this.dead || this.shove) return;
+    if (this.dead || this.shove || this.toss) return;
     // a slow, heavy heave — long two-handed thrust and a long cooldown
     this.shove = { t: 0, dur: 0.6, strikeAt: 0.38, dealt: false };
     this.shoveCd = 2.4;
@@ -411,11 +668,23 @@ export class Player {
       any = true;
     }
     if (anyBreak) ctx.audio.guardBreak();
+    // a two-handed heave into a shelf spills its sefarim too. Tighter than the enemy arc:
+    // you must be close and roughly facing it (no rattling a shelf across the room).
+    let hitShelf = false;
+    if (ctx.bookshelves) {
+      for (const sh of ctx.bookshelves) {
+        if (!sh.inStrike(this.pos.x, this.pos.z, f, 2.2, 0.3)) continue;
+        hitShelf = true;
+        sh.bump(this.pos.x, this.pos.z, ctx.audio);
+      }
+    }
     // camera nudge from the effort of the push (more when it connects)
-    this.recoil = Math.max(this.recoil, any ? 0.6 : 0.35);
+    this.recoil = Math.max(this.recoil, (any || hitShelf) ? 0.6 : 0.35);
     if (any) {
       this.shake = Math.min(1, this.shake + 0.16 + (anyBreak ? 0.12 : 0));
       if (this.onHit) this.onHit({ combo: this.combo, shove: true, poiseBreak: anyBreak, breakPos });
+    } else if (hitShelf) {
+      this.shake = Math.min(1, this.shake + 0.12);
     }
   }
 
@@ -428,9 +697,13 @@ export class Player {
     this.shoveCd = Math.max(0, this.shoveCd - dt);
     this.jabCd = Math.max(0, this.jabCd - dt);
     if (this.jabChainT > 0) this.jabChainT = Math.max(0, this.jabChainT - dt);
+    this.slowT = Math.max(0, this.slowT - dt);
+    this.knockedT = Math.max(0, this.knockedT - dt);
 
-    // regen slowly when out of combat
-    if (!this.dead && this.sinceDamage > 6 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 3.2 * dt);
+    // seated: a self-contained branch — look around freely, but any move/action gets up
+    if (this.sitting) { this._updateSitting(dt, ctx); return; }
+
+    // no passive regen — only pickups (kugel) restore HP
 
     // ---- look
     const md = inp.consumeMouse();
@@ -452,7 +725,9 @@ export class Player {
           const ml = Math.hypot(mv.x, mv.z) || 1;
           const back = Math.max(0, mv.z / ml);
           const dirFactor = 1 - back * (1 - BACKPEDAL);
-          const sp = (inp.sprinting() ? this.sprintSpeed : this.speed) * dirFactor;
+          // a mekubal's binding drags the legs: cut speed while the slow debuff is active
+          const slowMul = this.slowT > 0 ? this.slowFactor : 1;
+          const sp = (inp.sprinting() ? this.sprintSpeed : this.speed) * dirFactor * slowMul;
           this.vel.x = wx * sp; this.vel.z = wz * sp;
           moving = true;
           this.bobActive = Math.min(1, this.bobActive + dt * 5);
@@ -508,11 +783,16 @@ export class Player {
     // ---- wall-hug penalty (position is now final for the frame)
     this._updateCornered(dt, ctx);
 
+    // ---- bookshelf slam: sprinting into a shelf (or being flung into one) knocks its
+    // loose sefarim off the top shelves to rain down (see Bookshelf / hurtByFallingBook)
+    this._checkShelfBump(ctx);
+
     // ---- combat input
     if (!this.dead) {
       if (inp.consumeLight()) this.startAttack('light');
       if (inp.consumeHeavy() && this.heavyCd <= 0) this.startAttack('heavy');
       if (inp.consumeShove() && this.shoveCd <= 0) this._startShove();
+      if (inp.consumeThrow()) this._startToss(ctx);   // toss a shekel (guards on count/state inside)
       // a jab queued during the post-pair recovery fires the moment the lockout clears
       if (this.jabCd <= 0 && this.buffered && !this.attack) { const b = this.buffered; this.buffered = null; this.startAttack(b); }
     }
@@ -541,10 +821,21 @@ export class Player {
       if (s.t >= s.dur) this.shove = null;
     }
 
+    // ---- toss state (shekel throw; the coin leaves the hand at the release frame)
+    if (this.toss) {
+      const s = this.toss; s.t += dt;
+      if (!s.released && s.t >= s.strikeAt) { s.released = true; this._releaseToss(ctx); }
+      if (s.t >= s.dur) this.toss = null;
+    }
+
     // decay feedback
     this.shake = Math.max(0, this.shake - dt * 2.2);
     this.recoil = Math.max(0, this.recoil - dt * 5);
     this.pitchPunch = this.recoil * 0.05;
+
+    // ---- sit interaction: find the seat under the crosshair, and sit if asked
+    this._updateSitTarget(ctx);
+    if (inp.consumeSit() && this.sitState === 'enabled' && this.sitSeat) this._sitDown(this.sitSeat);
 
     this._animateView(dt, ctx.time);
     this._applyCamera(dt);
@@ -558,6 +849,8 @@ export class Player {
     let px = this.pos.x + r.x * bobX;
     let pz = this.pos.z + r.z * bobX;
     let py = EYE + bobY + this.yOff;
+    // seated: fixed low eye at the seat, no bob
+    if (this.sitting) { px = this.pos.x; pz = this.pos.z; py = this.sitting.eyeY; }
     // shake
     if (this.shake > 0.001) {
       const s = this.shake * 0.14;
@@ -589,6 +882,8 @@ export class Player {
 
     // a shove drives BOTH hands, so it wins over any in-progress jab/hook
     const shove = this.shove ? shovePose(this.shove.t / this.shove.dur) : null;
+    // a toss drives only the throwing (right) hand: it reaches up, then whips the coin out
+    const toss = this.toss ? tossPose(this.toss.t / this.toss.dur) : null;
 
     const arms = [
       [this.fistL, this._restL, this._restRotL, 'left', -1],
@@ -596,7 +891,10 @@ export class Player {
     ];
     for (const [fist, rest, restRot, hand, sign] of arms) {
       let dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
-      if (shove) {
+      if (toss && hand === 'right') {
+        dx = toss.dx; dy = toss.dy; dz = toss.dz;
+        rx = toss.rx; ry = toss.ry; rz = toss.rz;
+      } else if (shove) {
         // both fists thrust forward together and converge toward center,
         // heels of the hands leading the push
         dx = -sign * shove.dxIn; dy = shove.dy; dz = shove.dz;
@@ -618,6 +916,10 @@ export class Player {
           dz = -e * 0.5; dy = e * 0.1;
           rx = -e * 0.5; ry = -e * 0.11 * sign;
         }
+      } else if (this.sitting) {
+        // hands relax down onto the lap while seated
+        dx = -sign * 0.04; dy = -0.22; dz = 0.1;
+        rx = 0.55;
       }
       fist.position.set(rest.x + swayX + dx, rest.y + swayY + dy, rest.z + dz);
       fist.rotation.x = restRot.x + rx;
@@ -674,5 +976,30 @@ function shovePose(p) {
   return {
     dz: a[1] + (b[1] - a[1]) * t, dy: a[2] + (b[2] - a[2]) * t, dxIn: a[3] + (b[3] - a[3]) * t,
     rx: a[4] + (b[4] - a[4]) * t, rz: a[5] + (b[5] - a[5]) * t,
+  };
+}
+
+// Keyframed shekel toss for the right hand (offsets on top of the rest transform). The
+// hand lifts up and cocks back by the ear, then whips up-and-forward to fling the coin
+// out over the crowd. dz<0 is forward (the throw direction), dy>0 lifts the hand.
+const TOSS_KEYS = [
+  // p     dx     dy     dz     rx     ry     rz
+  [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],   // rest
+  [0.24, 0.00, 0.20, 0.06, -0.40, 0.08, 0.08],   // wind-up: coin raised by the shoulder, held open & in view
+  [0.40, 0.07, 0.24, -0.50, -1.05, 0.00, -0.05], // release: whip up-and-forward, arm extended out
+  [0.60, 0.10, 0.08, -0.44, -0.80, 0.00, -0.05], // follow-through
+  [1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],    // recover
+];
+function tossPose(p) {
+  let a = TOSS_KEYS[0], b = TOSS_KEYS[TOSS_KEYS.length - 1];
+  for (let i = 0; i < TOSS_KEYS.length - 1; i++) {
+    if (p >= TOSS_KEYS[i][0] && p <= TOSS_KEYS[i + 1][0]) { a = TOSS_KEYS[i]; b = TOSS_KEYS[i + 1]; break; }
+  }
+  const span = b[0] - a[0] || 1;
+  let t = (p - a[0]) / span;
+  t = t * t * (3 - 2 * t); // smoothstep between keys
+  return {
+    dx: a[1] + (b[1] - a[1]) * t, dy: a[2] + (b[2] - a[2]) * t, dz: a[3] + (b[3] - a[3]) * t,
+    rx: a[4] + (b[4] - a[4]) * t, ry: a[5] + (b[5] - a[5]) * t, rz: a[6] + (b[6] - a[6]) * t,
   };
 }

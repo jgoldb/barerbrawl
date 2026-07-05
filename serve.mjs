@@ -17,6 +17,7 @@ const MIME = {
   '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon', '.map': 'application/json',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
 };
 
 const server = createServer(async (req, res) => {

@@ -1,0 +1,15 @@
+# --- secrets: the ElevenLabs API key lives here and must NEVER be committed ---
+.env
+.env.*
+.elevenlabs.key
+*.key
+
+# --- build-time only (the voice-over generator's deps) ---
+# The generated clips under assets/vo/*.mp3 ARE committed — they ship with the game,
+# like the barer-*.png billboards. Only the generator's node_modules are ignored.
+node_modules/
+npm-debug.log*
+
+# --- JetBrains IDE (WebStorm/IntelliJ) project files ---
+.idea/
+*.iml

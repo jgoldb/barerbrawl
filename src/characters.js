@@ -2,24 +2,49 @@
 import * as THREE from 'three';
 import { MAT } from './assets.js';
 
+// ---- shared primitive geometry cache -----------------------------------------
+// Character rigs are built from a small, fixed vocabulary of primitive shapes at fixed
+// sizes — across the dozens of bochurim on screen only the MATERIALS (coat/skin/beard
+// tint) and transforms differ, never the geometry. So every enemy of a given build owns an
+// identical set of BufferGeometries; caching each by shape+dimensions lets all rigs share
+// one instance, so each distinct shape uploads to the GPU exactly once for the whole run
+// instead of once per character (the room-start stall was dominated by that first upload).
+// Shared geos are tagged `userData.shared` and must NEVER be disposed — freeing one would
+// pull the geometry out from under every other rig still drawing it. The teardown paths
+// (Enemy.dispose, main._disposeBackdrop, the cut-scene scene disposes) skip them; the pool
+// is small and bounded, so it just lives for the page's lifetime like the shared MAT.*.
+const _geoCache = new Map();
+function shared(key, make) {
+  let g = _geoCache.get(key);
+  if (!g) { g = make(); g.userData.shared = true; _geoCache.set(key, g); }
+  return g;
+}
+const boxGeo = (w, h, d) => shared(`b:${w},${h},${d}`, () => new THREE.BoxGeometry(w, h, d));
+const cylGeo = (rt, rb, h, seg) => shared(`c:${rt},${rb},${h},${seg}`, () => new THREE.CylinderGeometry(rt, rb, h, seg));
+const sphGeo = (r, seg) => shared(`s:${r},${seg}`, () => new THREE.SphereGeometry(r, seg, seg));
+const capGeo = (r, len, radial, capSeg) => shared(`p:${r},${len},${radial},${capSeg}`, () => new THREE.CapsuleGeometry(r, len, capSeg, radial));
+const coneGeo = (r, h, seg) => shared(`o:${r},${h},${seg}`, () => new THREE.ConeGeometry(r, h, seg));
+const torusGeo = (r, t, rs, ts) => shared(`t:${r},${t},${rs},${ts}`, () => new THREE.TorusGeometry(r, t, rs, ts));
+
 function box(w, h, d, mat) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  const m = new THREE.Mesh(boxGeo(w, h, d), mat);
   m.castShadow = true; m.receiveShadow = true; return m;
 }
 function cyl(rt, rb, h, mat, seg = 8) {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat);
+  const m = new THREE.Mesh(cylGeo(rt, rb, h, seg), mat);
   m.castShadow = true; m.receiveShadow = true; return m;
 }
 function sph(r, mat, seg = 10) {
-  const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, seg), mat);
+  const m = new THREE.Mesh(sphGeo(r, seg), mat);
   m.castShadow = true; m.receiveShadow = true; return m;
 }
 function cap(r, len, mat, radial = 10, capSeg = 6) {
-  const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, capSeg, radial), mat);
+  const m = new THREE.Mesh(capGeo(r, len, radial, capSeg), mat);
   m.castShadow = true; m.receiveShadow = true; return m;
 }
 
-// opts: {coat, skin, beard, hat:'fedora'|'homburg'|'big'|'none', bigBeard, glasses}
+// opts: {coat, skin, beard, hat:'fedora'|'homburg'|'big'|'shtreimel'|'kippah'|'none',
+//        bigBeard, glasses, tallis, eyeGlow, broad}
 export function buildCharacter(opts = {}) {
   const coatMat = MAT.black.clone(); coatMat.color.setHex(opts.coat ?? 0x0e0e12);
   const skinMat = MAT.skin.clone(); skinMat.color.setHex(opts.skin ?? 0xc79a74);
@@ -37,18 +62,30 @@ export function buildCharacter(opts = {}) {
   const torso = new THREE.Group(); torso.position.y = 0.13; hips.add(torso); joints.torso = torso;
   const chest = box(0.5, 0.6, 0.32, coatMat); chest.position.y = 0.3; torso.add(chest);
   // flared lower coat (kapote)
-  const coatSkirt = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.42, 0.62, 10), coatMat);
+  const coatSkirt = new THREE.Mesh(cylGeo(0.28, 0.42, 0.62, 10), coatMat);
   coatSkirt.position.y = -0.18; coatSkirt.castShadow = true; torso.add(coatSkirt);
   // white shirt collar / tzitzis hint
   const collar = box(0.2, 0.16, 0.2, shirt); collar.position.y = 0.55; torso.add(collar);
   const lapelL = box(0.06, 0.5, 0.02, shirt); lapelL.position.set(-0.06, 0.34, 0.17); lapelL.rotation.z = 0.12; torso.add(lapelL);
   const lapelR = lapelL.clone(); lapelR.position.x = 0.06; lapelR.rotation.z = -0.12; torso.add(lapelR);
+  // draped tallis (prayer shawl): a cream cloth over the shoulders with dark stripes
+  // running down two front panels — sets the white-robed mekubal apart from the crowd
+  if (opts.tallis) {
+    const cloth = MAT.tallis, stripe = MAT.talStripe;
+    const drape = box(0.58, 0.46, 0.03, cloth); drape.position.set(0, 0.42, -0.15); torso.add(drape);
+    for (const sx of [-0.17, 0.17]) {
+      const panel = box(0.13, 0.72, 0.03, cloth); panel.position.set(sx, 0.26, 0.17); torso.add(panel);
+      for (const sy of [-0.02, 0.07]) { const st = box(0.13, 0.035, 0.04, stripe); st.position.set(sx, sy, 0.18); torso.add(st); }
+    }
+  }
 
   // ---- head
   const neck = new THREE.Group(); neck.position.y = 0.62; torso.add(neck); joints.head = neck;
   const head = sph(0.19, skinMat); head.scale.set(1, 1.12, 1.02); head.position.y = 0.12; neck.add(head);
-  // eyes
-  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 0.4 });
+  // eyes — the mekubal's burn with a pale, otherworldly glow
+  const eyeMat = opts.eyeGlow
+    ? new THREE.MeshStandardMaterial({ color: 0xd6f2ff, emissive: 0x5fc8ff, emissiveIntensity: 1.5, roughness: 0.3 })
+    : new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 0.4 });
   for (const sx of [-0.07, 0.07]) {
     const e = sph(0.028, eyeMat, 8); e.position.set(sx, 0.14, 0.16); neck.add(e);
     // angry brow
@@ -59,7 +96,7 @@ export function buildCharacter(opts = {}) {
   const nose = box(0.04, 0.06, 0.05, skinMat); nose.position.set(0, 0.1, 0.19); neck.add(nose);
   // beard
   const bigB = opts.bigBeard;
-  const beard = new THREE.Mesh(new THREE.ConeGeometry(bigB ? 0.19 : 0.15, bigB ? 0.34 : 0.24, 10), beardMat);
+  const beard = new THREE.Mesh(coneGeo(bigB ? 0.19 : 0.15, bigB ? 0.34 : 0.24, 10), beardMat);
   beard.position.set(0, bigB ? -0.02 : 0.0, 0.06); beard.scale.z = 0.7; neck.add(beard);
   // moustache
   const mous = box(0.14, 0.03, 0.04, beardMat); mous.position.set(0, 0.05, 0.16); neck.add(mous);
@@ -71,12 +108,22 @@ export function buildCharacter(opts = {}) {
   if (opts.glasses) {
     const gm = new THREE.MeshStandardMaterial({ color: 0x111, roughness: 0.3, metalness: 0.4 });
     for (const sx of [-0.07, 0.07]) {
-      const r = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.008, 6, 12), gm);
+      const r = new THREE.Mesh(torusGeo(0.045, 0.008, 6, 12), gm);
       r.position.set(sx, 0.14, 0.18); neck.add(r);
     }
   }
   // ---- hat
-  if (opts.hat !== 'none') {
+  if (opts.hat === 'shtreimel') {
+    // a broad chassidic fur hat: a dark velvet crown ringed by a fat band of fur
+    const crown = cyl(0.2, 0.21, 0.17, MAT.woodDark, 18); crown.position.y = 0.31; neck.add(crown);
+    const top = cyl(0.2, 0.2, 0.02, MAT.woodDark, 18); top.position.y = 0.4; neck.add(top);
+    const fur = new THREE.Mesh(torusGeo(0.26, 0.12, 10, 22), MAT.fur);
+    fur.rotation.x = Math.PI / 2; fur.position.y = 0.3; fur.scale.y = 0.8; fur.castShadow = true; neck.add(fur);
+  } else if (opts.hat === 'kippah') {
+    // a domed skullcap so the bare-headed mekubal is still covered, in his tallis cream
+    const cap = new THREE.Mesh(shared('kippah', () => new THREE.SphereGeometry(0.2, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5)), MAT.tallis);
+    cap.position.y = 0.19; cap.scale.set(1.04, 0.6, 1.04); cap.castShadow = true; neck.add(cap);
+  } else if (opts.hat !== 'none') {
     const brimR = opts.hat === 'big' ? 0.34 : 0.28;
     const crownH = opts.hat === 'homburg' ? 0.24 : 0.2;
     const brim = cyl(brimR, brimR, 0.03, hatMat, 18); brim.position.y = 0.24; neck.add(brim);
@@ -102,6 +149,13 @@ export function buildCharacter(opts = {}) {
   joints.shoulderR = armR.shoulder; joints.elbowR = armR.elbow; joints.handR = armR.hand;
   // rest pose: arms slightly down/in
   armL.shoulder.rotation.z = 0.18; armR.shoulder.rotation.z = -0.18;
+  // a broad, heavyset build (the bulvan): widen the trunk and set the shoulders wider
+  // so the silhouette reads as a hulking bruiser rather than a scaled-up bochur
+  if (opts.broad) {
+    chest.scale.set(1.32, 1.0, 1.14);
+    pelvis.scale.x = 1.24; coatSkirt.scale.x = 1.16; collar.scale.x = 1.2;
+    armL.shoulder.position.x = -0.42; armR.shoulder.position.x = 0.42;
+  }
 
   // ---- legs (black trousers)
   function makeLeg(side) {
@@ -120,6 +174,26 @@ export function buildCharacter(opts = {}) {
   root.userData.height = 1.75;
   root.userData.mats = { coat: coatMat, skin: skinMat, beard: beardMat };
   return { root, joints };
+}
+
+// ---------------------------------------------------------------- sitting pose
+// A static seated pose applied to any rig's joints (shared by player POV geometry and
+// visible NPCs). The caller places the root at the seat's (x,z) on the floor and faces
+// it outward; this folds the body so the buttocks rest on a ~0.55-high seat with the
+// thighs forward, shins dropping to the floor, and hands settling onto the lap. Tuned
+// for the bench/chair seat height — see props.js seat anchors.
+export const SIT_HIP_Y = 0.64;   // hips lowered from the standing 0.82 onto the seat
+export function sitPose(joints) {
+  const j = joints;
+  j.hips.position.y = SIT_HIP_Y;
+  j.torso.rotation.set(0.08, 0, 0);   // faint forward lean
+  j.head.rotation.set(0.06, 0, 0);
+  // thighs swing forward toward horizontal (splayed a touch), knees fold the shins down
+  j.thighL.rotation.set(-1.15, 0, 0.06); j.thighR.rotation.set(-1.15, 0, -0.06);
+  j.kneeL.rotation.x = 1.4; j.kneeR.rotation.x = 1.4;
+  // arms relax down and forward, hands resting on the thighs
+  j.shoulderL.rotation.set(0.35, 0, 0.18); j.shoulderR.rotation.set(0.35, 0, -0.18);
+  j.elbowL.rotation.x = -0.7; j.elbowR.rotation.x = -0.7;
 }
 
 // ------------------------------------------------------------------ FPS fists

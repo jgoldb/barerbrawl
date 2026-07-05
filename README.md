@@ -5,9 +5,10 @@ You once learned here in peace. This morning, something turned — and the bochu
 are coming for you. Fight your way out, hall by hall. There is no ending, only how
 deep you get before the chevra buries you.
 
-Everything is generated at runtime — geometry, textures, characters, sound, and music.
-The lone exception is **Chaim Barer's face**: three photo billboards in `assets/`
-(shipped with the game) used for the boss-lackey encounter every 15th hall. The only
+Almost everything is generated at runtime — geometry, textures, characters, sound, and
+music. Two things ship as files instead: **Chaim Barer's face** (three photo billboards
+in `assets/`, used for the boss-lackey encounter every 15th hall) and the **cut-scene
+voice-over** (`assets/vo/*.mp3`, pre-rendered from the script below). The only runtime
 dependency is three.js (vendored offline in `vendor/`).
 
 ---
@@ -37,6 +38,52 @@ python -m http.server 8000    # then open http://localhost:8000
 
 Then click **Begin the Descent**. Click the canvas to lock the mouse and brawl.
 A recent Chrome/Edge/Firefox with WebGL is required.
+
+The game plays fine with no voice-over files present (the subtitles carry every
+scene); the clips are an enhancement layered on top — see below to generate them.
+
+---
+
+## Voice-over (cut-scene dialogue)
+
+The intro, the dvar-torah cut-scene, and the finisher shout are spoken by
+pre-rendered audio generated with the [ElevenLabs](https://elevenlabs.io)
+text-to-speech API. Every line lives in one place — **`src/vo-manifest.js`** — which
+is the single source of truth shared by the generator and the game. The generator
+writes one `assets/vo/<id>.mp3` per line; the game fetches and plays them, ducking the
+music while a line speaks. Missing clips are tolerated (playback is a silent no-op), so
+the game always runs whether or not you've generated them.
+
+**Generate the clips:**
+
+```bash
+npm install                        # one-time: pulls the ElevenLabs SDK (dev-only)
+
+# Supply your API key WITHOUT committing it — either export it:
+export ELEVENLABS_API_KEY=sk_...          # PowerShell:  $env:ELEVENLABS_API_KEY="sk_..."
+# …or drop it in a git-ignored .env.local at the repo root:
+#   ELEVENLABS_API_KEY=sk_...
+
+npm run gen-vo                     # generate anything new or changed
+npm run gen-vo -- --dry-run        # preview the plan; calls no API, spends no credits
+npm run gen-vo -- --force          # regenerate every clip
+npm run gen-vo -- --only=intro-1,dvar-13
+```
+
+The key is read only from the environment or a git-ignored `.env.local` /
+`.elevenlabs.key` — `.gitignore` keeps all of those (and `node_modules/`) out of the
+repo. The generated `assets/vo/*.mp3` **are** committed; they ship with the game like
+the Barer billboards. A sidecar `assets/vo/manifest.json` records a per-line hash, so
+re-running only regenerates lines whose text or voice actually changed.
+
+**Voices** are ElevenLabs *premade* (public) voices, so any account can generate without
+importing a custom voice first — a Narrator, the Rebbe, and the Player's shout. Swap any
+of them without touching tracked code via `VO_VOICE_NARRATOR` / `VO_VOICE_REBBE` /
+`VO_VOICE_PLAYER` (and the model/format via `VO_MODEL` / `VO_FORMAT`).
+
+To add or reword a line: edit its subtitle in the beat (`src/main.js` intro or
+`src/dvartorah.js`), mirror the spoken text in `src/vo-manifest.js`, then re-run
+`npm run gen-vo`.
 
 ---
 
@@ -94,8 +141,8 @@ it just makes the deployed version visible for confirmation.
   **Mashgiach**, a boss in the Great Shul.
 - **Score & combos.** Chain hits to build a combo multiplier. Clearing a hall and
   felling tougher foes drops a **kugel** to restore vitality.
-- **You will lose.** Survival regen is slow; the swarm eventually wins. The run ends
-  when you drop. Then you go again, deeper.
+- **You will lose.** There's no passive healing — only a **kugel** restores vitality,
+  so the swarm eventually wins. The run ends when you drop. Then you go again, deeper.
 
 ---
 
@@ -105,12 +152,14 @@ it just makes the deployed version visible for confirmation.
 index.html          markup + import map (three -> ./vendor)
 css/style.css       HUD, menus, cinematic overlay
 vendor/             three.js r160 (vendored for offline use)
-assets/             Chaim Barer face billboards (the only image files) — ships with the game
+assets/             Chaim Barer face billboards (images) + vo/ (cut-scene voice-over mp3s)
 serve.mjs           zero-dependency static server
+tools/gen-vo.mjs    build-time ElevenLabs voice-over generator (npm run gen-vo)
 src/
   main.js           entry: renderer, scene, state machine, game loop, intro cutscene
   rng.js            seedable RNG
-  audio.js          procedural Web Audio SFX + klezmer (Freygish) music engine
+  vo-manifest.js    single source of truth for every spoken line (generator + game)
+  audio.js          procedural Web Audio SFX + klezmer (Freygish) music engine + voice-over
   input.js          keyboard/mouse + pointer lock
   textures.js       canvas-generated wood / plaster / carpet / stone / sefarim
   assets.js         shared materials & palettes (+ loads the Barer billboards)

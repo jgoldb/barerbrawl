@@ -25,6 +25,7 @@ export function initAssets() {
   TEX.books = T.books();
   TEX.ceiling = T.ceilingTex();
   TEX.parchment = T.parchment();
+  TEX.shekelFace = T.shekelFace();
 
   // ---- surfaces
   MAT.floor = std({ map: TEX.floor, roughness: 0.72, metalness: 0.02 });
@@ -65,6 +66,12 @@ export function initAssets() {
   MAT.skin = std({ color: 0xc79a74, roughness: 0.72 });
   MAT.beard = std({ color: 0x2a1c10, roughness: 0.9 });
   MAT.beardGray = std({ color: 0x8a8073, roughness: 0.9 });
+  // shared trim for the two later-game archetypes: the Bulvan's fur shtreimel and the
+  // Mekubal's draped tallis (cream cloth with dark stripes). Shared MAT.* — cloned per
+  // enemy only for the flashed coat/skin/beard, so these are never disposed per-enemy.
+  MAT.fur = std({ color: 0x35271a, roughness: 1.0 });
+  MAT.tallis = std({ color: 0xeae3cf, roughness: 0.86 });
+  MAT.talStripe = std({ color: 0x181820, roughness: 0.78 });
 
   // fists (player view-model)
   MAT.knuckle = std({ color: 0xc79a74, roughness: 0.68 });
@@ -74,6 +81,12 @@ export function initAssets() {
   // pickups
   MAT.kugel = std({ color: 0xcaa03a, roughness: 0.75, emissive: 0x3a2a08, emissiveIntensity: 0.35 });
   MAT.plate = std({ color: 0xd8d4c8, roughness: 0.3, metalness: 0.4 });
+  // the shekel — a bright, minted gold coin. Faintly emissive so it catches the eye as it
+  // bounces off a fallen boss or skitters across the floor when tossed as a lure. The flat
+  // faces carry a struck Hebrew shin (see shekelFace); the edge is plain reeded gold.
+  MAT.shekel = std({ color: 0xe8c84e, roughness: 0.32, metalness: 0.9, emissive: 0x4a3808, emissiveIntensity: 0.45 });
+  MAT.shekelFace = std({ map: TEX.shekelFace, roughness: 0.3, metalness: 0.9, emissive: 0x2a2006, emissiveIntensity: 0.4 });
+  MAT.shekelEdge = std({ color: 0xc7a338, roughness: 0.38, metalness: 0.88, emissive: 0x2a2006, emissiveIntensity: 0.35 });
 
   // ---- Chaim Barer face billboards (async; ready well before hall 15)
   const loader = new THREE.TextureLoader();

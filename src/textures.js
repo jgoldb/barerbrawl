@@ -300,6 +300,139 @@ export function nightSkyline(glowHex = 0xffcf82, near = false) {
   return tex(c, 1, 1); // transparent background preserved (canvas was never filled)
 }
 
+// A sepia oil-portrait of a stern rabbi — hung on the beis-medrash walls between the
+// windows during the dvar-torah cut-scene. Painted fresh each call (small random
+// variation in beard/hat/pose) so a row of them reads as a gallery of different elders.
+export function rabbiPortrait() {
+  const w = 256, h = 336, { c, x } = cv(w, h);
+  const R = () => Math.random();
+  // aged sepia ground with a warm vignette
+  const bg = x.createRadialGradient(w * 0.5, h * 0.42, 20, w * 0.5, h * 0.5, h * 0.7);
+  bg.addColorStop(0, '#6a5636'); bg.addColorStop(0.55, '#43331e'); bg.addColorStop(1, '#1c130a');
+  x.fillStyle = bg; x.fillRect(0, 0, w, h);
+
+  const cx = w * 0.5 + (R() - 0.5) * 10;
+  const skin = R() < 0.5 ? '#b89570' : '#c7a079';
+  const grey = R() < 0.55;                 // greybeard elder vs. a darker-bearded one
+  const beardCol = grey ? '#c9c2b2' : '#4a3826';
+
+  // coat / shoulders (dark, rising from the bottom edge)
+  x.fillStyle = '#141019';
+  x.beginPath();
+  x.moveTo(cx - 96, h); x.lineTo(cx - 60, h * 0.66);
+  x.quadraticCurveTo(cx, h * 0.6, cx + 60, h * 0.66);
+  x.lineTo(cx + 96, h); x.closePath(); x.fill();
+  // white shirt V + a hint of tzitzis
+  x.fillStyle = '#d8cdb2';
+  x.beginPath(); x.moveTo(cx - 16, h * 0.68); x.lineTo(cx, h * 0.9); x.lineTo(cx + 16, h * 0.68); x.closePath(); x.fill();
+
+  // neck + face
+  x.fillStyle = skin;
+  x.fillRect(cx - 16, h * 0.5, 32, 48);
+  x.beginPath(); x.ellipse(cx, h * 0.42, 46, 58, 0, 0, 7); x.fill();
+  // soft shadow down one cheek
+  x.fillStyle = 'rgba(30,18,8,0.28)';
+  x.beginPath(); x.ellipse(cx + 22, h * 0.44, 20, 46, 0, 0, 7); x.fill();
+
+  // beard — a broad wedge under the face
+  x.fillStyle = beardCol;
+  x.beginPath();
+  x.moveTo(cx - 42, h * 0.4); x.quadraticCurveTo(cx - 52, h * 0.62, cx, h * 0.72);
+  x.quadraticCurveTo(cx + 52, h * 0.62, cx + 42, h * 0.4);
+  x.quadraticCurveTo(cx, h * 0.52, cx - 42, h * 0.4); x.fill();
+  // moustache
+  x.fillStyle = beardCol; x.fillRect(cx - 20, h * 0.44, 40, 7);
+  // beard streaks
+  x.strokeStyle = grey ? 'rgba(120,110,95,0.5)' : 'rgba(20,12,6,0.5)'; x.lineWidth = 1;
+  for (let i = 0; i < 14; i++) {
+    const sx = cx - 40 + R() * 80; x.beginPath(); x.moveTo(sx, h * 0.42);
+    x.lineTo(sx + (R() - 0.5) * 8, h * (0.5 + R() * 0.2)); x.stroke();
+  }
+
+  // eyes (stern, deep-set) + brows + nose
+  x.fillStyle = '#1a120a';
+  for (const s of [-1, 1]) { x.beginPath(); x.ellipse(cx + s * 17, h * 0.39, 5, 3.4, 0, 0, 7); x.fill(); }
+  x.strokeStyle = grey ? '#8a8272' : '#2a1c10'; x.lineWidth = 4; x.lineCap = 'round';
+  for (const s of [-1, 1]) { x.beginPath(); x.moveTo(cx + s * 9, h * 0.35); x.lineTo(cx + s * 26, h * 0.365); x.stroke(); }
+  x.fillStyle = 'rgba(60,36,18,0.35)'; x.fillRect(cx - 4, h * 0.39, 8, 20); // nose shadow
+
+  // black hat (homburg / brimmed) sitting on top
+  const brimY = h * 0.3, brimW = 62 + R() * 10;
+  x.fillStyle = '#0a0a0d';
+  x.beginPath(); x.ellipse(cx, brimY, brimW, 12, 0, 0, 7); x.fill();
+  const crownH = 40 + R() * 16;
+  x.fillRect(cx - 34, brimY - crownH, 68, crownH);
+  x.beginPath(); x.ellipse(cx, brimY - crownH, 34, 9, 0, 0, 7); x.fill();
+  x.fillStyle = 'rgba(40,30,16,0.5)'; x.fillRect(cx - 34, brimY - 14, 68, 6); // hatband
+
+  // canvas craquelure + grime, then a heavy vignette
+  noise(x, w, h, 2, 0.08);
+  const vg = x.createRadialGradient(w * 0.5, h * 0.45, h * 0.25, w * 0.5, h * 0.5, h * 0.62);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.6)');
+  x.fillStyle = vg; x.fillRect(0, 0, w, h);
+  return tex(c, 1, 1);
+}
+
+// A backlit stained-glass window — leaded jewel-toned panes under an arched top with a
+// central Star-of-David roundel. Drawn bright/saturated because it's used on an unlit
+// (self-glowing) material to read as daylight pouring through coloured glass.
+function _shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = Math.min(255, ((n >> 16) & 255) * f) | 0;
+  const g = Math.min(255, ((n >> 8) & 255) * f) | 0;
+  const b = Math.min(255, (n & 255) * f) | 0;
+  return `rgb(${r},${g},${b})`;
+}
+export function stainedGlass() {
+  const w = 320, h = 448, { c, x } = cv(w, h);
+  const m = 8, springY = 132; // arch springs from here up to a semicircle
+  x.fillStyle = '#050406'; x.fillRect(0, 0, w, h); // leading everywhere behind the panes
+
+  // clip to the arched opening so the corners stay dark (stone), panes only inside
+  const archPath = () => {
+    x.beginPath();
+    x.moveTo(m, h - m); x.lineTo(m, springY);
+    x.arc(w / 2, springY, w / 2 - m, Math.PI, 0, false);
+    x.lineTo(w - m, h - m); x.closePath();
+  };
+  x.save(); archPath(); x.clip();
+
+  // a soft light behind the glass
+  const bg = x.createRadialGradient(w / 2, springY + 30, 20, w / 2, h * 0.52, h * 0.72);
+  bg.addColorStop(0, '#4a5f92'); bg.addColorStop(1, '#0c1330');
+  x.fillStyle = bg; x.fillRect(0, 0, w, h);
+
+  const jewels = ['#1f46b0', '#9c1a2c', '#d6a531', '#1f7a54', '#54277f', '#c25c1e', '#2f7cb8', '#861449'];
+  const cols = 6, rowsN = 9, cw = w / cols, ch = h / rowsN;
+  for (let r = 0; r < rowsN; r++) for (let col = 0; col < cols; col++) {
+    const px = col * cw, py = r * ch;
+    const base = jewels[(r * 3 + col * 2 + ((r * col) % 4)) % jewels.length];
+    const pg = x.createLinearGradient(px, py, px, py + ch);
+    pg.addColorStop(0, _shade(base, 1.3)); pg.addColorStop(0.5, base); pg.addColorStop(1, _shade(base, 0.72));
+    x.fillStyle = pg; x.fillRect(px + 3, py + 3, cw - 6, ch - 6);
+    x.fillStyle = 'rgba(255,255,255,0.07)'; x.fillRect(px + 3, py + 3, cw - 6, 3); // glassy top sheen
+  }
+  // leading grid
+  x.strokeStyle = '#0a0808'; x.lineWidth = 4;
+  for (let col = 0; col <= cols; col++) { x.beginPath(); x.moveTo(col * cw, 0); x.lineTo(col * cw, h); x.stroke(); }
+  for (let r = 0; r <= rowsN; r++) { x.beginPath(); x.moveTo(0, r * ch); x.lineTo(w, r * ch); x.stroke(); }
+
+  // central roundel + Star of David
+  const rx = w / 2, ry = h * 0.46, R = 72;
+  x.beginPath(); x.arc(rx, ry, R, 0, 7); x.fillStyle = '#e7c645'; x.fill();       // gold rim
+  x.beginPath(); x.arc(rx, ry, R - 9, 0, 7); x.fillStyle = '#123a86'; x.fill();   // blue field
+  x.lineJoin = 'round'; x.strokeStyle = '#f2d564'; x.lineWidth = 6;
+  const tri = (rot) => { x.beginPath(); for (let i = 0; i < 3; i++) { const a = rot + i * 2 * Math.PI / 3; const bx = rx + Math.cos(a) * (R - 18), by = ry + Math.sin(a) * (R - 18); i ? x.lineTo(bx, by) : x.moveTo(bx, by); } x.closePath(); x.stroke(); };
+  tri(-Math.PI / 2); tri(Math.PI / 2);
+  x.beginPath(); x.arc(rx, ry, R, 0, 7); x.strokeStyle = '#0a0808'; x.lineWidth = 5; x.stroke();
+  x.restore();
+
+  // heavy stone arch frame
+  x.strokeStyle = '#080607'; x.lineWidth = 9; archPath(); x.stroke();
+  noise(x, w, h, 2, 0.05);
+  return tex(c, 1, 1);
+}
+
 // Transparent crack overlay laid over a cracked (not-yet-shattered) pane:
 // radial fractures from an off-center impact, a few stress rings, a bright core.
 export function glassCracks() {
@@ -337,4 +470,39 @@ export function glassCracks() {
   }
   x.fillStyle = 'rgba(255,255,255,0.8)'; x.beginPath(); x.arc(ox, oy, 2.5, 0, 7); x.fill();
   return tex(c, 1, 1);
+}
+
+// The minted face of a shekel: a struck-gold field with a milled rim and a big embossed
+// Hebrew shin (ש, for שקל / shekel) in the centre. Mapped onto the coin's flat caps.
+export function shekelFace() {
+  const w = 256, h = 256, { c, x } = cv(w, h);
+  const cx = w / 2, cy = h / 2;
+  // struck-gold field, brightest off-centre for a raised, coined sheen
+  const g = x.createRadialGradient(cx * 0.78, cy * 0.68, 8, cx, cy, w * 0.62);
+  g.addColorStop(0, '#fbeda6');
+  g.addColorStop(0.5, '#e9c657');
+  g.addColorStop(1, '#a37c1c');
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+  // milled edge: a bright inner ring, a dark seat, and a ring of reeding ticks
+  x.strokeStyle = 'rgba(80,58,12,0.85)'; x.lineWidth = 9;
+  x.beginPath(); x.arc(cx, cy, w * 0.43, 0, Math.PI * 2); x.stroke();
+  x.strokeStyle = 'rgba(255,244,196,0.6)'; x.lineWidth = 2.5;
+  x.beginPath(); x.arc(cx, cy, w * 0.385, 0, Math.PI * 2); x.stroke();
+  x.strokeStyle = 'rgba(80,58,12,0.5)'; x.lineWidth = 3;
+  for (let i = 0; i < 44; i++) {
+    const a = (i / 44) * Math.PI * 2;
+    x.beginPath();
+    x.moveTo(cx + Math.cos(a) * w * 0.44, cy + Math.sin(a) * w * 0.44);
+    x.lineTo(cx + Math.cos(a) * w * 0.485, cy + Math.sin(a) * w * 0.485);
+    x.stroke();
+  }
+  // the embossed letter: a light highlight offset behind a darker face, for relief
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = 'bold 160px "Segoe UI", "Arial Hebrew", Arial, serif';
+  x.fillStyle = 'rgba(255,246,206,0.55)'; x.fillText('ש', cx + 3, cy + 6);
+  x.fillStyle = '#7a5814'; x.fillText('ש', cx, cy);
+  noise(x, w, h, 1.4, 0.05);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
 }

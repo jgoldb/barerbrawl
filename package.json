@@ -6,7 +6,11 @@
   "scripts": {
     "start": "node serve.mjs",
     "serve": "node serve.mjs",
-    "bump": "node bump-version.mjs"
+    "bump": "node bump-version.mjs",
+    "gen-vo": "node tools/gen-vo.mjs"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.56.0"
+  }
 }

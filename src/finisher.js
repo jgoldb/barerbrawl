@@ -136,6 +136,7 @@ export class BarerFinisher {
     this.faceMat.map = BARER.def; this.faceMat.needsUpdate = true;
     if (this.ui.lewieBanner) this.ui.lewieBanner();
     if (this.ui.showFinisherPrompt) this.ui.showFinisherPrompt(false);
+    if (this.audio.playVO) this.audio.playVO('finisher-lewie'); // the player's own manic battle cry
     this.audio.whoosh(true);
     this.audio.barerSquawk();   // seized by the ears — one last panicked ostrich squawk
   }

@@ -39,6 +39,12 @@ export class TouchControls {
     this.btnShove = this._button('shove', 'SHOVE', () => { this.input.shoveQueued = true; }, root);
     this.btnHeavy = this._button('heavy', 'HAYMAKER', () => { this.input.heavyQueued = true; }, root);
     this.btnJab = this._button('jab', 'JAB', () => { this.input.lightQueued = true; }, root);
+    // contextual sit button — only shown when the player is looking at a usable seat
+    this.btnSit = this._button('sit', 'SIT', () => { this.input.sitQueued = true; }, root);
+    this.btnSit.classList.add('hidden');
+    // contextual toss button — only shown when the player is carrying at least one shekel
+    this.btnToss = this._button('toss', 'TOSS ₪', () => { this.input.throwQueued = true; }, root);
+    this.btnToss.classList.add('hidden');
 
     // pause (top-right)
     this.btnPause = this._button('pause', 'II', () => this.onPause(), root, false);
@@ -146,19 +152,25 @@ export class TouchControls {
 
   isPortrait() { return this.portrait; }
 
+  // show/hide the contextual sit button (driven by the player's sit state each frame)
+  setSitVisible(on) { this.btnSit.classList.toggle('hidden', !on); }
+
+  // show/hide the contextual toss button (driven by the player's shekel count each frame)
+  setTossVisible(on) { this.btnToss.classList.toggle('hidden', !on); }
+
   // ---------------------------------------------------------------- visibility
   setVisible(on) {
     // never show the sticks over a portrait "rotate device" screen
     if (on && this.portrait) on = false;
     this.root.classList.toggle('hidden', !on);
-    if (!on) this._resetActive();
+    if (!on) { this._resetActive(); this.btnSit.classList.add('hidden'); this.btnToss.classList.add('hidden'); }
   }
 
   _resetActive() {
     this.moveId = null; this.lookId = null;
     this.stick.style.opacity = '0';
     this.knob.style.transform = 'translate(-50%,-50%)';
-    for (const b of [this.btnJab, this.btnHeavy, this.btnShove, this.btnJump, this.btnPause]) b.classList.remove('down');
+    for (const b of [this.btnJab, this.btnHeavy, this.btnShove, this.btnJump, this.btnPause, this.btnSit, this.btnToss]) b.classList.remove('down');
     this.input.touchMove.x = 0; this.input.touchMove.z = 0; this.input.touchSprint = false;
   }
 }

@@ -37,6 +37,14 @@ export const ARCHETYPES = {
   bochur:    { hp: 32,  speed: 2.6, dmg: 8,  scale: 1.0,  reach: 1.5, cd: 1.25, windup: 0.42, poise: 20,  hat: 'fedora', knockRes: 1.0, score: 100, tint: 0x0e0e12, ranged: true },
   masmid:    { hp: 20,  speed: 3.8, dmg: 6,  scale: 0.94, reach: 1.4, cd: 0.95, windup: 0.30, poise: 13,  hat: 'fedora', knockRes: 1.3, score: 130, glasses: true, tint: 0x14140f, ranged: true },
   gabbai:    { hp: 78,  speed: 1.9, dmg: 17, scale: 1.22, reach: 1.7, cd: 1.6,  windup: 0.6,  poise: 54,  hat: 'big', bigBeard: true, knockRes: 0.55, score: 260, tint: 0x0d1210, ranged: true, heaver: true },
+  // The Bulvan — a hulking, fur-hatted brute. His blows don't cut deep, but each landed
+  // strike BODILY KNOCKS THE PLAYER BACK (`knockback`), shoving you out of position. Very
+  // heavy build → low knockRes (he barely budges when hit), tanky HP, slow & telegraphed.
+  bulvan:    { hp: 96,  speed: 2.0, dmg: 12, scale: 1.32, reach: 1.8, cd: 1.7,  windup: 0.6,  poise: 70,  hat: 'shtreimel', bigBeard: true, broad: true, beardHex: 0x241812, knockRes: 0.38, score: 300, tint: 0x1a1209, knockback: 3.2 },
+  // The Mekubal — a gaunt, white-robed kabbalist with glowing eyes and a draped tallis.
+  // His touch lays a binding on your legs: a landed strike SLOWS THE PLAYER'S MOVEMENT
+  // (`slow`) for a spell. Little damage; the debuff is the threat.
+  mekubal:   { hp: 46,  speed: 2.7, dmg: 7,  scale: 1.04, reach: 1.7, cd: 1.5,  windup: 0.55, poise: 30,  hat: 'kippah', bigBeard: true, tallis: true, eyeGlow: true, beardHex: 0x8a8073, knockRes: 1.0, score: 320, tint: 0xd8d0bd, slow: { factor: 0.5, dur: 2.6 } },
   mashgiach: { hp: 240, speed: 2.3, dmg: 24, scale: 1.38, reach: 2.0, cd: 1.5,  windup: 0.7,  poise: 155, hat: 'homburg', bigBeard: true, glasses: true, knockRes: 0.3, score: 900, boss: true, tint: 0x090b10, heaver: true },
   // Chaim Barer — the boss's lackey (every 9th hall). Invulnerable until the
   // Mashgiach falls, then a soft touch. No face is drawn: a photo billboards over him.
@@ -59,8 +67,9 @@ export class Enemy {
     const built = buildCharacter({
       coat: A.tint ?? rng.pick(COAT_COLORS),
       skin: rng.pick(SKIN_TONES),
-      beard: A.bigBeard ? rng.pick(BEARD_TONES) : rng.pick(BEARD_TONES.slice(0, 4)),
+      beard: A.beardHex ?? (A.bigBeard ? rng.pick(BEARD_TONES) : rng.pick(BEARD_TONES.slice(0, 4))),
       hat: A.hat, bigBeard: A.bigBeard, glasses: A.glasses,
+      tallis: A.tallis, eyeGlow: A.eyeGlow, broad: A.broad,
     });
     this.root = built.root;
     this.joints = built.joints;
@@ -324,6 +333,27 @@ export class Enemy {
     const dx = P.x - this.pos.x, dz = P.z - this.pos.z;
     const dist = Math.hypot(dx, dz);
 
+    // ---- shekel lure: a tossed coin pulls the whole room off the player. Target the
+    // nearest active lure this frame; the director decides who actually snatches it up.
+    let lure = null;
+    if (ctx.lures) {
+      let best = Infinity;
+      for (const L of ctx.lures) {
+        const lx = L.x - this.pos.x, lz = L.z - this.pos.z, d2 = lx * lx + lz * lz;
+        if (d2 < best) { best = d2; lure = L; }
+      }
+    }
+    // a coin appearing mid-swing breaks the enemy's concentration — drop any attack in
+    // progress and go for the money (hit-reactions stagger/knockdown still play out)
+    if (lure) {
+      const st = this.state;
+      if (st === 'windup' || st === 'strike' || st === 'recover' || st === 'throwWind' ||
+          st === 'throw' || st === 'heaveWind' || st === 'heave' || st === 'barerWind' || st === 'barerStrike') {
+        this.state = 'approach'; this.hasDealt = true;
+        if (this.isBarer) this.setFace('default');
+      }
+    }
+
     // separation from other enemies
     let sepx = 0, sepz = 0;
     for (const o of ctx.enemies) {
@@ -335,6 +365,19 @@ export class Enemy {
     }
 
     if (this.spawnAnim > 0) this.spawnAnim = Math.max(0, this.spawnAnim - dt * 1.6);
+
+    // Only a knockdown tilts the whole body toward the floor; every other on-foot state
+    // stands upright. If a knockdown is cut short — e.g. a shove lands mid-rise and bumps
+    // the enemy into 'stagger' — nothing else clears that tilt, so the body would stay
+    // slanted and drift off its (un-rotated) circular hitbox. Ease the root back to
+    // vertical whenever we're not knocked down (dead/downed already returned above).
+    if (this.state !== 'knockdown') {
+      const k = Math.min(1, dt * 12);
+      this.root.rotation.x += (0 - this.root.rotation.x) * k;
+      this.root.rotation.z += (0 - this.root.rotation.z) * k;
+      if (Math.abs(this.root.rotation.x) < 1e-3) this.root.rotation.x = 0;
+      if (Math.abs(this.root.rotation.z) < 1e-3) this.root.rotation.z = 0;
+    }
 
     switch (this.state) {
       case 'stagger':
@@ -360,7 +403,15 @@ export class Enemy {
           ctx.audio.whoosh(this.boss);
           if (dist < this.arch.reach + ctx.player.radius + 0.3) {
             const inFront = (dx * Math.sin(this.facing) + dz * Math.cos(this.facing)) > 0;
-            if (inFront) { ctx.player.takeDamage(this.dmg, this.pos); ctx.audio.hit(this.boss, 0.8); }
+            if (inFront) {
+              // capture hittability BEFORE the hit (takeDamage raises i-frames) so a blow
+              // that lands during invulnerability doesn't also knock/slow the player
+              const landed = !ctx.player.dead && (ctx.player.invuln || 0) <= 0;
+              ctx.player.takeDamage(this.dmg, this.pos); ctx.audio.hit(this.boss, 0.8);
+              // on-hit riders: the bulvan shoves you back, the mekubal binds your legs
+              if (landed && this.arch.knockback && ctx.player.knockBack) ctx.player.knockBack(this.pos, this.arch.knockback);
+              if (landed && this.arch.slow && ctx.player.applySlow) ctx.player.applySlow(this.arch.slow.factor, this.arch.slow.dur);
+            }
           }
         }
         if (this.timer <= 0) { this.state = 'recover'; this.timer = 0.32; }
@@ -441,14 +492,20 @@ export class Enemy {
         }
         break;
       }
-      default: { // idle / approach
+      default: { // idle / approach — or, when a coin's in play, chase the lure instead
         this.cooldown -= dt;
         this.throwCd = Math.max(0, this.throwCd - dt);
         if (this.isBarer) this.specialCd -= dt;
-        // ---- anti-perch: the player is safely elevated on furniture and out of every
-        // enemy's melee reach. Rather than mill uselessly at the base, throw a sefer
-        // (arcs over the tables) or, for the heavies, heave them off if we're close.
-        if (ctx.antiPerch) {
+
+        // when lured, the coin is the target and the enemy throws no punches; otherwise
+        // it's the usual hunt-the-player behaviour (with the anti-perch harassment)
+        const TX = lure ? lure.x : P.x, TZ = lure ? lure.z : P.z;
+        const tdx = TX - this.pos.x, tdz = TZ - this.pos.z;
+        const tdist = Math.hypot(tdx, tdz);
+
+        // ---- anti-perch (player-only): the player is safely elevated and out of reach.
+        // Rather than mill uselessly, throw a sefer or, for the heavies, heave them off.
+        if (!lure && ctx.antiPerch) {
           if (this.arch.heaver && dist < this.arch.reach + 1.6) {
             this.faceTo(P.x, P.z, dt);
             this.state = 'heaveWind'; this.timer = 0.55; this.hasDealt = false;
@@ -459,17 +516,17 @@ export class Enemy {
             this.state = 'throwWind'; this.timer = 0.45; this.hasDealt = false;
             break;
           }
-          // not able to act yet → keep repositioning toward the player (below) to get
-          // into range / line of sight.
+          // not able to act yet → keep repositioning toward the player (below).
         }
-        if (dist > this.arch.reach + ctx.player.radius) {
-          // Desired heading: make a beeline when the player is in the clear, otherwise
-          // follow the flow field around the furniture. resolveCircle still does the
-          // final push-out, but the field means they aim *around* obstacles, not into
-          // them, so they stop grinding on tables and benches.
-          const inv = 1 / (dist || 1);
-          let dirx = dx * inv, dirz = dz * inv, routing = false;
-          if (ctx.nav && lineBlocked(this.pos.x, this.pos.z, P.x, P.z, ctx.colliders, this.radius + 0.05)) {
+
+        const stopDist = lure ? (this.radius + 0.4) : (this.arch.reach + ctx.player.radius);
+        if (tdist > stopDist) {
+          // Desired heading: make a beeline when the target is in the clear, otherwise
+          // follow the flow field around the furniture (only when hunting the player — the
+          // field points at the player, so a lure just gets a beeline + collision slide).
+          const inv = 1 / (tdist || 1);
+          let dirx = tdx * inv, dirz = tdz * inv, routing = false;
+          if (!lure && ctx.nav && lineBlocked(this.pos.x, this.pos.z, P.x, P.z, ctx.colliders, this.radius + 0.05)) {
             const fl = ctx.nav.dirAt(this.pos.x, this.pos.z, _navDir);
             if (fl.x !== 0 || fl.z !== 0) { dirx = fl.x; dirz = fl.z; routing = true; }
           }
@@ -477,11 +534,16 @@ export class Enemy {
           const ml = Math.hypot(mx, mz) || 1;
           const sp = this.speed * (this.spawnAnim > 0 ? 0.5 : 1);
           this.pos.x += (mx / ml) * sp * dt; this.pos.z += (mz / ml) * sp * dt;
-          // face where they're actually walking while routing, else square up on the player
+          // face where they're actually walking while routing, else square up on the target
           if (routing) this.faceTo(this.pos.x + mx, this.pos.z + mz, dt);
-          else this.faceTo(P.x, P.z, dt);
+          else this.faceTo(TX, TZ, dt);
           this._poseWalk(dt, sp);
           this.state = 'approach';
+        } else if (lure) {
+          // reached the coin — mill over it, the director resolves who grabs it
+          this.faceTo(TX, TZ, dt);
+          this._poseIdle(time, 1);
+          this.pos.x += sepx * this.speed * dt; this.pos.z += sepz * this.speed * dt;
         } else {
           this.faceTo(P.x, P.z, dt);
           this._poseIdle(time, 1);
@@ -635,14 +697,17 @@ export class Enemy {
     const j = this.joints;
     const p = Math.min(1, (1.1 - timeLeft) / 0.3);
     const up = Math.max(0, (0.4 - timeLeft) / 0.4);
-    const lie = p - up;
+    // Clamp so the pose is monotonic (upright → fall back → upright): p can start
+    // negative and up can overshoot 1 at the tail, which would otherwise leave a small
+    // wrong-direction tilt lingering after the knockdown finishes.
+    const lie = Math.max(0, p - up);
     this.root.rotation.x = -lie * Math.PI * 0.42;
     this.root.position.y = this.groundY;
     j.torso.rotation.x = 0.1;
   }
 
   dispose() {
-    this.root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry !== _hpBar) o.geometry.dispose(); });
+    this.root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry !== _hpBar && !o.geometry.userData.shared) o.geometry.dispose(); });
     for (const k in this.mats) this.mats[k].dispose();
     this.barFill.material.dispose(); this.barBg.material.dispose();
     if (this.faceMat) this.faceMat.dispose(); // shared BARER textures are NOT disposed

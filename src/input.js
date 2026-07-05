@@ -15,6 +15,8 @@ export class Input {
     this.heavyQueued = false;
     this.shoveQueued = false;
     this.jumpQueued = false;
+    this.sitQueued = false;         // sit down / stand up (KeyF, or the touch SIT button)
+    this.throwQueued = false;       // toss a shekel (KeyQ, or the touch TOSS button)
 
     // touch controls feed into these; keyboard/mouse leave them at rest
     this.touchMove = { x: 0, z: 0 }; // analog stick direction (merged into moveVector)
@@ -40,7 +42,7 @@ export class Input {
     if (!on) {
       this.keys.clear();
       this.touchMove.x = 0; this.touchMove.z = 0; this.touchSprint = false;
-      this.jumpQueued = this.lightQueued = this.heavyQueued = this.shoveQueued = false;
+      this.jumpQueued = this.lightQueued = this.heavyQueued = this.shoveQueued = this.sitQueued = this.throwQueued = false;
     }
   }
 
@@ -61,6 +63,8 @@ export class Input {
       if (this._enabled && (code === 'Space' || code.startsWith('Arrow'))) e.preventDefault();
       if (this._enabled && code === 'Space') this.jumpQueued = true;
       if (this._enabled && code === 'KeyE') this.shoveQueued = true;
+      if (this._enabled && code === 'KeyF') this.sitQueued = true;
+      if (this._enabled && code === 'KeyQ') this.throwQueued = true;
     } else {
       this.keys.delete(code);
     }
@@ -113,5 +117,7 @@ export class Input {
   consumeHeavy() { const v = this.heavyQueued; this.heavyQueued = false; return v; }
   consumeShove() { const v = this.shoveQueued; this.shoveQueued = false; return v; }
   consumeJump() { const v = this.jumpQueued; this.jumpQueued = false; return v; }
+  consumeSit() { const v = this.sitQueued; this.sitQueued = false; return v; }
+  consumeThrow() { const v = this.throwQueued; this.throwQueued = false; return v; }
   wasPressed(code) { return this.pressed.has(code); }
 }

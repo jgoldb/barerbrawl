@@ -39,8 +39,166 @@ export function bookshelf(w = 2.2, h = 3.6) {
     sh.position.set(0, (h / rows) * i, 0.02);
     g.add(sh);
   }
+  // ---- loose sefarim standing on the top couple of shelves. These are the books that
+  // get knocked off when the player slams into the shelf — sprinting into it or flung
+  // into it by an NPC (see the Bookshelf controller). Kept DETERMINISTIC (no Math.random)
+  // so building a shelf inside a seeded pass — the title backdrop — never shifts the RNG
+  // stream (the tumble itself, fired at runtime, is where the randomness lives).
+  const bookMats = [MAT.woodRed, MAT.woodDark, MAT.velvet, MAT.velvetBlue];
+  const books = [];
+  const innerW = w - 0.24;                          // clear of the side frames
+  const shelfGap = h / rows;
+  const nBooks = Math.min(5, Math.max(2, Math.round(innerW / 0.42)));
+  for (let s = 0; s < 2; s++) {                     // the top two interior shelf surfaces
+    const shelfY = shelfGap * (rows - 1 - s);
+    for (let i = 0; i < nBooks; i++) {
+      const t = nBooks === 1 ? 0.5 : i / (nBooks - 1);
+      const bw = 0.15 + ((i + s) % 3) * 0.03;
+      const bh = 0.26 + ((i * 2 + s) % 3) * 0.03;
+      const bk = box(bw, bh, 0.3, bookMats[(i + s) % bookMats.length], false);
+      bk.position.set(-innerW / 2 + 0.12 + t * (innerW - 0.24), shelfY + bh / 2 + 0.03, 0.04);
+      bk.rotation.y = ((i + s) % 2 ? 1 : -1) * 0.06; // a tiny deterministic skew
+      g.add(bk);
+      books.push({ mesh: bk, state: 'shelved' });
+    }
+  }
   g.userData.footprint = { hx: w / 2, hz: d / 2 };
+  g.userData.shelf = new Bookshelf(g, w, h, d, books);
   return g;
+}
+
+// Controller attached to a bookshelf group (group.userData.shelf). When the player slams
+// into the shelf — sprinting into it, or knocked into it by an NPC — a couple of the loose
+// sefarim on the top shelves get knocked off and tumble down; any that land on the player
+// thump them for a little damage. Self-contained: the falling books are the shelf's own
+// child meshes, animated in the group's LOCAL space (the group is yaw-only, so local Y is
+// world Y and gravity reads correctly), and the player is transformed into that local frame
+// for the strike test. Registered per-cell so the director can drive it (see roombuilder /
+// director.currentBookshelves).
+class Bookshelf {
+  constructor(group, w, h, d, books) {
+    this.group = group;
+    this.w = w; this.h = h; this.d = d;
+    this.books = books;      // [{ mesh, state:'shelved'|'falling'|'resting'|'gone', ... }]
+    this.falling = [];       // books currently in flight
+    this.cool = 0;           // re-trigger cooldown so one slam = one cascade
+    // world transform (yaw-only) + footprint AABB — filled by refreshWorld() once placed
+    this.gx = 0; this.gz = 0; this.cos = 1; this.sin = 0;
+    this.minX = 0; this.maxX = 0; this.minZ = 0; this.maxZ = 0;
+  }
+
+  // Cache the group's world placement so we can map books <-> player between local & world.
+  // Call after the room builder has positioned/rotated the group.
+  refreshWorld() {
+    const g = this.group, ry = g.rotation.y;
+    this.gx = g.position.x; this.gz = g.position.z;
+    this.cos = Math.cos(ry); this.sin = Math.sin(ry);
+    const hx = (this.w / 2) * Math.abs(this.cos) + (this.d / 2) * Math.abs(this.sin);
+    const hz = (this.w / 2) * Math.abs(this.sin) + (this.d / 2) * Math.abs(this.cos);
+    this.minX = this.gx - hx; this.maxX = this.gx + hx;
+    this.minZ = this.gz - hz; this.maxZ = this.gz + hz;
+  }
+
+  _toWorld(lx, ly, lz) {
+    return { x: this.gx + this.cos * lx + this.sin * lz, y: ly, z: this.gz - this.sin * lx + this.cos * lz };
+  }
+  _localXZ(px, pz) {
+    const ex = px - this.gx, ez = pz - this.gz;
+    return { x: this.cos * ex - this.sin * ez, z: this.sin * ex + this.cos * ez };
+  }
+
+  // Does the circle (px,pz,r) overlap the shelf footprint? (the contact test for a slam)
+  touched(px, pz, r) {
+    const cx = Math.max(this.minX, Math.min(px, this.maxX));
+    const cz = Math.max(this.minZ, Math.min(pz, this.maxZ));
+    const dx = px - cx, dz = pz - cz;
+    return dx * dx + dz * dz <= r * r;
+  }
+
+  // Is the shelf within a strike of reach `reach` aimed along forward `f` (a unit XZ vector)
+  // from (px,pz), inside the cone whose cosine is `cosCone`? The distance/aim use the NEAREST
+  // point on the footprint, so punching either end of a wide shelf counts; standing right up
+  // against it always counts (the aim direction degenerates there). The strike test for a
+  // punch/haymaker/shove connecting with the shelf (see player._resolveAttack/_resolveShove).
+  inStrike(px, pz, f, reach, cosCone) {
+    const cx = Math.max(this.minX, Math.min(px, this.maxX));
+    const cz = Math.max(this.minZ, Math.min(pz, this.maxZ));
+    const dx = cx - px, dz = cz - pz;
+    const dist = Math.hypot(dx, dz);
+    if (dist > reach) return false;
+    if (dist < 0.1) return true;
+    return (dx / dist) * f.x + (dz / dist) * f.z >= cosCone;
+  }
+
+  // Knock a couple of loose sefarim off the top shelves — biased toward the ones above the
+  // player's contact point so a slam here rains books here. Returns true if any fell (so the
+  // caller can play the tumble SFX). No-op while cooling down or once the shelf is picked clean.
+  bump(px, pz, audio) {
+    if (this.cool > 0) return false;
+    const shelved = this.books.filter((b) => b.state === 'shelved');
+    if (!shelved.length) return false;
+    const loc = this._localXZ(px, pz);   // the player's lateral offset in shelf space (loc.x)
+    shelved.sort((a, b) => Math.abs(a.mesh.position.x - loc.x) - Math.abs(b.mesh.position.x - loc.x));
+    const n = Math.min(shelved.length, 2 + (Math.random() * 3 | 0));   // 2..4 books
+    for (let i = 0; i < n; i++) {
+      const b = shelved[i];
+      b.state = 'falling';
+      b.vx = (Math.random() - 0.5) * 1.3;   // lateral scatter (local x)
+      b.vy = 0.3 + Math.random() * 0.7;     // a little pop up first
+      b.vz = 0.9 + Math.random() * 1.0;     // outward into the room (local +z)
+      b.rx = (Math.random() - 0.5) * 10;
+      b.ry = (Math.random() - 0.5) * 10;
+      b.rz = (Math.random() - 0.5) * 10;
+      b.live = true;                        // can still strike the player
+      b.rest = 0;
+      this.falling.push(b);
+    }
+    this.cool = 0.7;
+    if (audio) audio.booksTumble();
+    return true;
+  }
+
+  // Integrate the falling books and test them against the player each frame. Driven by the
+  // director (which owns the player + audio). `player` supplies pos.{x,z}, yOff, radius, dead,
+  // and hurtByFallingBook(dmg, srcWorldPos).
+  update(dt, player, audio) {
+    if (this.cool > 0) this.cool = Math.max(0, this.cool - dt);
+    if (!this.falling.length) return;
+    const BOOK_DMG = 4, GRAV = 17;
+    const feet = player ? player.yOff : 0;
+    const loY = feet + 0.5, hiY = feet + 1.95;
+    const hitR = (player ? player.radius : 0.4) + 0.3;
+    for (let i = this.falling.length - 1; i >= 0; i--) {
+      const b = this.falling[i], m = b.mesh;
+      if (b.state === 'resting') {
+        b.rest += dt;
+        if (b.rest > 1.2) m.scale.setScalar(Math.max(0, 1 - (b.rest - 1.2) / 0.6));   // shrink away
+        if (b.rest > 1.8) { this.group.remove(m); if (m.geometry) m.geometry.dispose(); b.state = 'gone'; this.falling.splice(i, 1); }
+        continue;
+      }
+      // ballistic tumble in local space
+      b.vy -= GRAV * dt;
+      m.position.x += b.vx * dt; m.position.y += b.vy * dt; m.position.z += b.vz * dt;
+      m.rotation.x += b.rx * dt; m.rotation.y += b.ry * dt; m.rotation.z += b.rz * dt;
+      // strike the player? map the book to world and test their torso/head column
+      if (b.live && player && !player.dead) {
+        const wp = this._toWorld(m.position.x, m.position.y, m.position.z);
+        if (wp.y > loY && wp.y < hiY) {
+          const dx = wp.x - player.pos.x, dz = wp.z - player.pos.z;
+          if (dx * dx + dz * dz < hitR * hitR) {
+            b.live = false;
+            player.hurtByFallingBook(BOOK_DMG, { x: wp.x, z: wp.z });
+            if (audio) audio.bookThump();
+            b.vy = -Math.abs(b.vy) * 0.3; b.vx *= 0.4; b.vz *= 0.4;   // deflect down off the player
+          }
+        }
+      }
+      // land on the floor (world y 0 == local y 0 — the group sits on the ground)
+      if (m.position.y <= 0.06) {
+        m.position.y = 0.06; b.live = false; b.state = 'resting'; b.rest = 0;
+      }
+    }
+  }
 }
 
 // ---- Long study table (shulchan) with sefarim + shtenders on top -------------
@@ -103,6 +261,10 @@ export function shtender() {
 }
 
 // ---- Bench -------------------------------------------------------------------
+// A bench exposes several evenly-spaced seat anchors along its length. Each seat is
+// a local {x,y,z, ry} where ry is the character-convention yaw the occupant faces
+// (0 = local +Z, out over the bench's front edge). The room builder transforms these
+// to world space so player/NPCs can sit on them (see roombuilder place() / inst.seats).
 export function bench(len = 3) {
   const g = new THREE.Group();
   const seat = box(len, 0.1, 0.5, MAT.woodMid); seat.position.y = 0.5; g.add(seat);
@@ -111,10 +273,18 @@ export function bench(len = 3) {
   }
   g.userData.footprint = { hx: len / 2, hz: 0.25 };
   g.userData.standHeight = 0.55; // top face of the seat (y 0.5 + half of 0.1)
+  const nSeats = Math.max(1, Math.floor(len / 0.95));
+  const span = Math.max(0, len - 0.8), seats = [];
+  for (let i = 0; i < nSeats; i++) {
+    const t = nSeats === 1 ? 0.5 : i / (nSeats - 1);
+    seats.push({ x: -span / 2 + t * span, y: 0.55, z: 0, ry: 0 });
+  }
+  g.userData.seats = seats;
   return g;
 }
 
 // ---- Chair -------------------------------------------------------------------
+// One seat, facing out from the backrest (local +Z; the back sits at -Z).
 export function chair() {
   const g = new THREE.Group();
   const seat = box(0.5, 0.08, 0.5, MAT.woodMid); seat.position.y = 0.5; g.add(seat);
@@ -123,6 +293,7 @@ export function chair() {
     const leg = box(0.07, 0.5, 0.07, MAT.woodDark); leg.position.set(sx, 0.25, sz); g.add(leg);
   }
   g.userData.footprint = { hx: 0.3, hz: 0.3 };
+  g.userData.seats = [{ x: 0, y: 0.54, z: 0.03, ry: 0 }];
   return g;
 }
 
@@ -206,6 +377,25 @@ function crackMat() {
 function revealMat() {
   if (!_revealMat) _revealMat = new THREE.MeshStandardMaterial({ color: 0x14100b, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide });
   return _revealMat;
+}
+
+// Pre-build the window diorama materials/textures that windowArch would otherwise
+// generate lazily on the FIRST window of a session. Those generators (nightSky /
+// nightSkyline) draw from the global Math.random, so if that first window happens to be
+// built inside a seeded pass — the deterministic title backdrop — the lazy generation
+// shifts the seed stream and the backdrop differs on first load vs later visits. Warming
+// them once up front (like initAssets does for every other texture) keeps that pass
+// reproducible. Only two glow hexes are ever used: the warm beis/library glow and the
+// cold crypt glow (see windowArch / perimeterShelves); both are cheap to bake once.
+export function warmWindowMaterials() {
+  crackMat();
+  revealMat();
+  for (const glow of [0xffcf82, 0x3a4a6a]) {
+    glassMat(glow);
+    skyMat(glow);
+    skylineMat(_farCache, glow, false);
+    skylineMat(_nearCache, glow, true);
+  }
 }
 
 // a small irregular triangle for a flying glass shard
@@ -361,6 +551,53 @@ export function windowArch(w = 1.4, h = 2.4, nightGlow = 0xffcf82) {
   return g;
 }
 
+// ---- Backlit stained-glass window (faces +Z) --------------------------------
+// A self-glowing arched stained-glass pane set in a dark stone reveal + frame, so it
+// reads as daylight pouring through coloured glass. Used by the chavrusa cut-scene.
+export function stainedGlassWindow(w = 2.6, h = 4.0) {
+  const g = new THREE.Group();
+  const t = T.stainedGlass();
+  const mat = new THREE.MeshBasicMaterial({ map: t });   // unlit → glows regardless of scene light
+  const pane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+  pane.position.set(0, h / 2, 0); g.add(pane);
+  // dark stone reveal box behind the glass — makes it sit in a thick wall
+  const rev = new THREE.MeshStandardMaterial({ color: 0x181309, roughness: 0.95, side: THREE.DoubleSide });
+  const D = 0.24;
+  const rp = (geoW, geoH, rotAx, rot, px, py, pz) => { const mm = new THREE.Mesh(new THREE.PlaneGeometry(geoW, geoH), rev); mm.rotation[rotAx] = rot; mm.position.set(px, py, pz); g.add(mm); };
+  rp(w, D, 'x', Math.PI / 2, 0, h, -D / 2); rp(w, D, 'x', -Math.PI / 2, 0, 0, -D / 2);
+  rp(D, h, 'y', Math.PI / 2, -w / 2, h / 2, -D / 2); rp(D, h, 'y', -Math.PI / 2, w / 2, h / 2, -D / 2);
+  // dark wood frame + mullions
+  const fm = MAT.woodDark;
+  g.add(put(box(w + 0.34, 0.2, 0.26, fm, false), 0, h + 0.06, 0.02));
+  g.add(put(box(w + 0.34, 0.24, 0.28, fm, false), 0, -0.04, 0.02));
+  g.add(put(box(0.2, h + 0.2, 0.26, fm, false), -w / 2 - 0.1, h / 2, 0.02));
+  g.add(put(box(0.2, h + 0.2, 0.26, fm, false), w / 2 + 0.1, h / 2, 0.02));
+  g.add(put(box(0.07, h, 0.16, fm, false), 0, h / 2, 0.03));
+  for (const yy of [h * 0.3, h * 0.6, h * 0.85]) g.add(put(box(w, 0.07, 0.16, fm, false), 0, yy, 0.03));
+  g.userData._tex = t; g.userData._mat = mat;
+  return g;
+}
+
+// ---- Hinged study door (faces +Z; swings open on userData.pivot) -------------
+// A dim corridor shows beyond it; the chavrusa cut-scene swings it open when the
+// panicked bachur barges in.
+export function studyDoor(w = 1.5, h = 3.2) {
+  const g = new THREE.Group();
+  const beyond = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: 0x120d06 }));
+  beyond.position.set(0, h / 2, -0.3); g.add(beyond);
+  const fm = MAT.woodDark;
+  g.add(put(box(w + 0.34, 0.24, 0.36, fm, false), 0, h + 0.06, 0));
+  g.add(put(box(0.24, h + 0.12, 0.36, fm, false), -w / 2 - 0.12, h / 2, 0));
+  g.add(put(box(0.24, h + 0.12, 0.36, fm, false), w / 2 + 0.12, h / 2, 0));
+  // hinged slab: pivot at the left jamb so it swings on that edge
+  const pivot = new THREE.Group(); pivot.position.set(-w / 2, 0, 0); g.add(pivot);
+  const slab = box(w, h, 0.1, MAT.woodMid); slab.position.set(w / 2, h / 2, 0); pivot.add(slab);
+  for (const yy of [h * 0.26, h * 0.74]) { const band = box(w - 0.08, 0.08, 0.13, MAT.iron); band.position.set(w / 2, yy, 0.06); pivot.add(band); }
+  const handle = cyl(0.04, 0.04, 0.2, MAT.brass, 8); handle.rotation.x = Math.PI / 2; handle.position.set(w - 0.16, h / 2, 0.09); pivot.add(handle);
+  g.userData.pivot = pivot; g.userData.beyond = beyond;
+  return g;
+}
+
 // ---- Aron Kodesh (the Ark) — centerpiece of a shul room ----------------------
 export function aronKodesh() {
   const g = new THREE.Group();
@@ -404,6 +641,28 @@ export function banner(w = 1.2, h = 1.8) {
   const g = new THREE.Group();
   const cloth = box(w, h, 0.04, MAT.parchment, false); cloth.position.y = -h / 2; g.add(cloth);
   const rod = cyl(0.03, 0.03, w + 0.2, MAT.brass, 6); rod.rotation.z = Math.PI / 2; g.add(rod);
+  return g;
+}
+
+// ---- Framed rabbi portrait (hangs on a wall, faces +Z) ----------------------
+// A sepia oil-portrait behind a gilt frame + dark backing board. Used to dot the
+// beis-medrash walls between the windows in the dvar-torah cut-scene.
+export function portrait(w = 1.0, h = 1.36) {
+  const g = new THREE.Group();
+  const t = T.rabbiPortrait();
+  const picMat = new THREE.MeshStandardMaterial({ map: t, roughness: 0.92, metalness: 0.0 });
+  // dark backing board the picture is mounted on
+  const board = box(w + 0.02, h + 0.02, 0.05, MAT.woodDark); board.position.z = 0; g.add(board);
+  const pic = new THREE.Mesh(new THREE.PlaneGeometry(w, h), picMat);
+  pic.position.z = 0.03; g.add(pic);
+  // gilt frame: four bars around the opening (so the picture shows through the middle)
+  const fw = 0.08, fd = 0.07;
+  const bar = (bw, bh, px, py) => { const m = box(bw, bh, fd, MAT.gold); m.position.set(px, py, 0.04); g.add(m); };
+  bar(w + fw * 2, fw, 0, h / 2 + fw / 2);
+  bar(w + fw * 2, fw, 0, -h / 2 - fw / 2);
+  bar(fw, h + fw * 2, -w / 2 - fw / 2, 0);
+  bar(fw, h + fw * 2, w / 2 + fw / 2, 0);
+  g.userData._tex = t; g.userData._picMat = picMat;
   return g;
 }
 

@@ -1,5 +1,10 @@
 // Fully procedural audio: no sample files. Web Audio API synthesis for SFX,
 // ambience, and a klezmer-flavored (Freygish / Phrygian-dominant) music engine.
+// The one exception (mirroring the barer-*.png face billboards): pre-rendered
+// character voice-over — cut-scene narration + the finisher shout — decoded from
+// assets/vo/*.mp3 and played back through the VO bus (see the VOICE-OVER section).
+
+import { VO_DIR } from './vo-manifest.js';
 
 const FREYGISH = [0, 1, 4, 5, 7, 8, 10]; // scale degrees in semitones
 
@@ -49,6 +54,11 @@ function clamp01(v) { v = +v; return v >= 0 ? (v <= 1 ? v : 1) : 0; } // also ma
 const VOL_KEY = 'bb_volumes';
 const VOL_DEFAULT = { master: 0.9, music: 1.0, sfx: 1.0, muted: false };
 
+// The one pre-rendered sound effect (everything else is synthesized): the sting
+// that plays when the player is beaten down. Decoded + cached like the VO clips;
+// see the SAMPLE SFX section. Missing/undecodable file = silent no-op.
+const DEATH_SFX = './assets/death.ogg';
+
 export class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -74,6 +84,14 @@ export class AudioEngine {
     this._intensity = 0;
     this._ambNodes = null;
     this._footFlip = false;
+
+    // ---- voice-over (pre-rendered dialogue) ----
+    this._voxBuffers = new Map(); // id -> AudioBuffer, or null once a fetch/decode fails (missing clip)
+    this._voxSource = null;       // the currently-sounding line (only ever one at a time)
+    this._voxSeq = 0;             // bumped by every play/stop so a slow decode can't play late
+
+    // ---- one-shot sample SFX (pre-rendered files, e.g. the death sting) ----
+    this._sampleBuffers = new Map(); // url -> AudioBuffer, or null once a fetch/decode fails
   }
 
   init() {
@@ -94,8 +112,17 @@ export class AudioEngine {
 
     // Per-category user volume trims sit between the buses and the compressor,
     // so setMusicVolume/setSfxVolume are independent of the dynamic fades on the buses.
-    this.musicVol = ctx.createGain(); this.musicVol.gain.value = this.volumes.music; this.musicVol.connect(this.out);
+    this.musicVol = ctx.createGain(); this.musicVol.gain.value = this.volumes.music;
+    // A duck node between the music trim and the output, dipped while a voice-over
+    // line is speaking so the narration stays intelligible over the klezmer bed.
+    // Everything music-side (music, ambience, and their reverb sends) feeds musicVol,
+    // so ducking here dips the whole background bed at once (see playVO / _duckMusic).
+    this._musicDuck = ctx.createGain(); this._musicDuck.gain.value = 1.0;
+    this.musicVol.connect(this._musicDuck); this._musicDuck.connect(this.out);
     this.sfxVol = ctx.createGain(); this.sfxVol.gain.value = this.volumes.sfx; this.sfxVol.connect(this.out);
+    // Spoken-dialogue bus (cut-scene narration + the finisher shout). Routed through
+    // the SFX trim so the in-game "SFX" slider governs it alongside the other effects.
+    this.voxBus = ctx.createGain(); this.voxBus.gain.value = 1.0; this.voxBus.connect(this.sfxVol);
 
     this.musicBus = ctx.createGain(); this.musicBus.gain.value = 0.0; this.musicBus.connect(this.musicVol);
     this.sfxBus = ctx.createGain(); this.sfxBus.gain.value = 0.95; this.sfxBus.connect(this.sfxVol);
@@ -186,6 +213,119 @@ export class AudioEngine {
       gain.exponentialRampToValueAtTime(0.0002, t + a + d);
     }
   }
+
+  // ============================================================= VOICE-OVER
+  // Pre-rendered character dialogue (assets/vo/<id>.mp3), generated offline by
+  // tools/gen-vo.mjs from src/vo-manifest.js. Each clip is fetched once, decoded to
+  // an AudioBuffer, and cached. Everything degrades gracefully: if a clip is missing
+  // (the files aren't generated yet) the fetch just fails and playback is a silent
+  // no-op — the on-screen subtitles carry the scene regardless.
+
+  // Kick off fetch+decode for a set of ids ahead of time so playback is instant.
+  preloadVO(ids) {
+    if (!this.ctx || !ids) return;
+    for (const id of ids) this._loadVO(id);
+  }
+
+  async _loadVO(id) {
+    if (this._voxBuffers.has(id)) return this._voxBuffers.get(id);
+    // Store the in-flight promise so concurrent callers share one fetch.
+    const promise = (async () => {
+      try {
+        const res = await fetch(`${VO_DIR}${id}.mp3`);
+        if (!res.ok) return null;                       // not generated yet / 404
+        const arr = await res.arrayBuffer();
+        return await this.ctx.decodeAudioData(arr);
+      } catch (e) { return null; }
+    })();
+    this._voxBuffers.set(id, promise);
+    const buf = await promise;
+    this._voxBuffers.set(id, buf);                      // replace promise with the resolved buffer (or null)
+    return buf;
+  }
+
+  // Speak a line by id. Interrupts any line already playing (dialogue is one channel),
+  // and ducks the music bed for the duration. Awaits the decode if it isn't cached yet.
+  async playVO(id) {
+    if (!this.ready) return;
+    const seq = ++this._voxSeq;
+    this._stopVoxSource();
+    const buf = await this._loadVO(id);
+    if (!buf || seq !== this._voxSeq) return;           // missing clip, or superseded while decoding
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.voxBus);
+    src.onended = () => {
+      if (this._voxSource === src) { this._voxSource = null; this._duckMusic(false); }
+    };
+    this._voxSource = src;
+    this._duckMusic(true);
+    src.start();
+  }
+
+  // Cut the current line and lift the duck (used when a cut-scene is skipped/ends).
+  stopVO() {
+    this._voxSeq++;
+    this._stopVoxSource();
+    this._duckMusic(false);
+  }
+
+  _stopVoxSource() {
+    if (!this._voxSource) return;
+    try { this._voxSource.onended = null; this._voxSource.stop(); } catch (e) {}
+    this._voxSource = null;
+  }
+
+  _duckMusic(on) {
+    if (!this._musicDuck) return;
+    const t = this._now();
+    const target = on ? 0.3 : 1.0;
+    this._musicDuck.gain.cancelScheduledValues(t);
+    this._musicDuck.gain.setValueAtTime(this._musicDuck.gain.value, t);
+    this._musicDuck.gain.linearRampToValueAtTime(target, t + (on ? 0.25 : 0.5));
+  }
+
+  // ============================================================= SAMPLE SFX
+  // The game's sound is otherwise fully synthesized; this plays a pre-rendered
+  // one-shot sample file the same way the voice-over loader handles its clips:
+  // fetched + decoded once and cached, then played through the SFX bus so the
+  // in-game "SFX" volume governs it. Degrades gracefully — a missing or (on a
+  // browser that can't decode the format) undecodable file is a silent no-op.
+
+  async _loadSample(url) {
+    if (this._sampleBuffers.has(url)) return this._sampleBuffers.get(url);
+    // Store the in-flight promise so concurrent callers share one fetch (mirrors _loadVO).
+    const promise = (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return null;                       // missing file / 404
+        const arr = await res.arrayBuffer();
+        return await this.ctx.decodeAudioData(arr);
+      } catch (e) { return null; }
+    })();
+    this._sampleBuffers.set(url, promise);
+    const buf = await promise;
+    this._sampleBuffers.set(url, buf);                  // replace promise with the resolved buffer (or null)
+    return buf;
+  }
+
+  // Fire a one-shot sample through the SFX bus at an optional gain trim.
+  async playSample(url, gain = 1) {
+    if (!this.ready) return;
+    const buf = await this._loadSample(url);
+    if (!buf) return;                                   // not decoded (missing/unsupported)
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const g = this.ctx.createGain(); g.gain.value = gain;
+    src.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    src.start();
+  }
+
+  // Warm the death sting so it plays the instant the player drops (call once audio is unlocked).
+  preloadDeath() { if (this.ctx) this._loadSample(DEATH_SFX); }
+
+  // The player's death sting (pre-rendered clip; see SAMPLE SFX above).
+  playerDeath() { this.playSample(DEATH_SFX); }
 
   // ============================================================= SFX
   whoosh(heavy = false) {
@@ -352,6 +492,45 @@ export class AudioEngine {
     const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.002, 0.32, 0.14);
     n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus);
     n.start(t); n.stop(t + 0.2);
+  }
+
+  // The heavy body-check of a bulvan's blow landing — a deep, woody whump under the
+  // normal hit, punchier and more "shove" than a strike, to sell being knocked back.
+  bulvanSlam() {
+    if (!this.ready) return;
+    const t = this._now();
+    // low body thump
+    const o = this.ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.22);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.004, 0.85, 0.34);
+    o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    o.start(t); o.stop(t + 0.4);
+    // woody knock transient
+    const n = this._noiseSrc();
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 320; bp.Q.value = 1.4;
+    const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.002, 0.5, 0.14);
+    n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus);
+    n.start(t); n.stop(t + 0.2);
+  }
+
+  // The mekubal's binding taking hold — an eerie descending shimmer (a detuned fifth
+  // sliding down) over a dark low swell, marking the moment your legs go heavy.
+  hex() {
+    if (!this.ready) return;
+    const t = this._now();
+    for (const det of [1, 1.5]) {   // root + a hollow fifth above it
+      const o = this.ctx.createOscillator(); o.type = 'triangle';
+      o.frequency.setValueAtTime(midi(70) * det, t);
+      o.frequency.exponentialRampToValueAtTime(midi(53) * det, t + 0.6);
+      const g = this.ctx.createGain(); this._env(g.gain, t, 0.01, 0.14, 0.6);
+      o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+      o.start(t); o.stop(t + 0.7);
+    }
+    const o2 = this.ctx.createOscillator(); o2.type = 'sine';
+    o2.frequency.setValueAtTime(90, t); o2.frequency.exponentialRampToValueAtTime(46, t + 0.5);
+    const g2 = this.ctx.createGain(); this._env(g2.gain, t, 0.05, 0.3, 0.5);
+    o2.connect(g2); g2.connect(this.sfxBus);
+    o2.start(t); o2.stop(t + 0.6);
   }
 
   // Chaim Barer takes a shot and lets out an indignant, ostrich-like squawk: a reedy,
@@ -576,6 +755,30 @@ export class AudioEngine {
     }
   }
 
+  // The walls grinding in as the corner pressure bites: a gritty stone crush — a burst of
+  // lowpassed noise that darkens as it decays, under a low body-thud so each beat lands with
+  // weight. `intensity` (0..1) rises with severity: louder, brighter grit, more menace.
+  wallCrush(intensity = 1) {
+    if (!this.ready) return;
+    const t = this._now();
+    const amp = 0.16 + 0.4 * intensity;
+    // grinding grit: noise swept from bright to dark, so it reads as stone dragging shut
+    const n = this._noiseSrc();
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(420 + 620 * intensity, t);
+    lp.frequency.exponentialRampToValueAtTime(150, t + 0.24);
+    lp.Q.value = 1.1;
+    const ng = this.ctx.createGain(); this._env(ng.gain, t, 0.008, amp, 0.28);
+    n.connect(lp); lp.connect(ng); ng.connect(this.sfxBus); ng.connect(this.reverb);
+    n.start(t); n.stop(t + 0.36);
+    // low body-thud so the crush has heft
+    const o = this.ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(72, t); o.frequency.exponentialRampToValueAtTime(33, t + 0.2);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.004, amp * 0.7, 0.22);
+    o.connect(g); g.connect(this.sfxBus);
+    o.start(t); o.stop(t + 0.3);
+  }
+
   footstep() {
     if (!this.ready) return;
     const t = this._now();
@@ -614,6 +817,64 @@ export class AudioEngine {
     const og = this.ctx.createGain(); this._env(og.gain, t, 0.003, 0.3, 0.12);
     o.connect(og); og.connect(this.sfxBus);
     o.start(t); o.stop(t + 0.2);
+  }
+
+  // A cascade of sefarim spilling off a shelf: a flurry of woody knocks and papery page
+  // flutters as several books tumble and clap down. Randomized so no two cascades match.
+  booksTumble() {
+    if (!this.ready) return;
+    const t = this._now();
+    const nBooks = 4 + (Math.random() * 3 | 0);
+    for (let i = 0; i < nBooks; i++) {
+      const st = t + i * (0.05 + Math.random() * 0.09);
+      // woody knock — a short bandpassed noise clap (the hard cover)
+      const n = this._noiseSrc();
+      const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass';
+      bp.frequency.value = 260 + Math.random() * 260; bp.Q.value = 1.3;
+      const ng = this.ctx.createGain(); this._env(ng.gain, st, 0.002, 0.16 + Math.random() * 0.1, 0.1);
+      n.connect(bp); bp.connect(ng); ng.connect(this.sfxBus); ng.connect(this.reverb);
+      n.start(st); n.stop(st + 0.14);
+      // low woody body under most of them
+      if (Math.random() < 0.6) {
+        const o = this.ctx.createOscillator(); o.type = 'sine';
+        o.frequency.setValueAtTime(150 + Math.random() * 70, st); o.frequency.exponentialRampToValueAtTime(52, st + 0.12);
+        const g = this.ctx.createGain(); this._env(g.gain, st, 0.003, 0.24, 0.14);
+        o.connect(g); g.connect(this.sfxBus);
+        o.start(st); o.stop(st + 0.2);
+      }
+      // papery page flutter — a brief highpassed noise hiss
+      const p = this._noiseSrc();
+      const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2600 + Math.random() * 1800;
+      const pg = this.ctx.createGain(); this._env(pg.gain, st, 0.004, 0.05 + Math.random() * 0.04, 0.09);
+      p.connect(hp); hp.connect(pg); pg.connect(this.sfxBus);
+      p.start(st); p.stop(st + 0.12);
+    }
+  }
+
+  // A single heavy sefer landing on the player — a loud, low woody thump with a hard-cover
+  // knock and a papery slap. `intensity` (~0..1.2) scales the weight.
+  bookThump(intensity = 1) {
+    if (!this.ready) return;
+    const t = this._now();
+    const amp = 0.4 + 0.55 * Math.min(1.2, intensity);
+    // low woody body thud
+    const o = this.ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(46, t + 0.18);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.004, amp, 0.24);
+    o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    o.start(t); o.stop(t + 0.34);
+    // woody knock transient (the hard cover slapping)
+    const n2 = this._noiseSrc();
+    const bp2 = this.ctx.createBiquadFilter(); bp2.type = 'bandpass'; bp2.frequency.value = 340; bp2.Q.value = 1.5;
+    const ng2 = this.ctx.createGain(); this._env(ng2.gain, t, 0.002, amp * 0.7, 0.11);
+    n2.connect(bp2); bp2.connect(ng2); ng2.connect(this.sfxBus);
+    n2.start(t); n2.stop(t + 0.16);
+    // papery slap on top
+    const p = this._noiseSrc();
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200;
+    const pg = this.ctx.createGain(); this._env(pg.gain, t, 0.001, amp * 0.4, 0.05);
+    p.connect(hp); hp.connect(pg); pg.connect(this.sfxBus);
+    p.start(t); p.stop(t + 0.09);
   }
 
   gate(open) {
@@ -700,6 +961,71 @@ export class AudioEngine {
       o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
       o.start(st); o.stop(st + 0.3);
     });
+  }
+
+  // A bright minted "ching" for collecting a shekel — a clean two-note metallic rise
+  // with a glassy overtone, distinct from the kugel's softer arpeggio.
+  coinGet() {
+    if (!this.ready) return;
+    const t = this._now();
+    [midi(84), midi(91)].forEach((f, i) => {
+      const st = t + i * 0.07;
+      const o = this.ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+      const o2 = this.ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f * 2.01; // shimmer partial
+      const g = this.ctx.createGain(); this._env(g.gain, st, 0.002, 0.22, 0.28);
+      const g2 = this.ctx.createGain(); this._env(g2.gain, st, 0.002, 0.08, 0.2);
+      o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+      o2.connect(g2); g2.connect(this.sfxBus);
+      o.start(st); o.stop(st + 0.34); o2.start(st); o2.stop(st + 0.3);
+    });
+  }
+
+  // Light, ringing spin as the shekel leaves the hand — an airy whir with a coin shimmer.
+  coinToss() {
+    if (!this.ready) return;
+    const t = this._now();
+    const n = this._noiseSrc();
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.3;
+    bp.frequency.setValueAtTime(600, t); bp.frequency.exponentialRampToValueAtTime(1500, t + 0.16);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.008, 0.16, 0.2);
+    n.connect(bp); bp.connect(g); g.connect(this.sfxBus);
+    n.start(t); n.stop(t + 0.3);
+    const o = this.ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = midi(90);
+    const og = this.ctx.createGain(); this._env(og.gain, t, 0.003, 0.1, 0.16);
+    o.connect(og); og.connect(this.sfxBus); og.connect(this.reverb);
+    o.start(t); o.stop(t + 0.2);
+  }
+
+  // A short, bright metallic "tink" each time the coin bounces; pitch varies with the
+  // bounce so a settling shekel rings down a little scatter of taps.
+  coinBounce(vel = 1) {
+    if (!this.ready) return;
+    const t = this._now();
+    const f = 1500 + Math.min(1, vel) * 1400 + Math.random() * 400;
+    const o = this.ctx.createOscillator(); o.type = 'triangle';
+    o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.7, t + 0.08);
+    const g = this.ctx.createGain(); this._env(g.gain, t, 0.001, 0.06 + 0.08 * Math.min(1, vel), 0.09);
+    o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+    o.start(t); o.stop(t + 0.14);
+  }
+
+  // A bochur snatches the tossed shekel off the floor — a quick clinking grab and a
+  // low, satisfied "aha" grunt as the distraction pays off.
+  coinNab() {
+    if (!this.ready) return;
+    const t = this._now();
+    for (const off of [0, 0.04]) {
+      const o = this.ctx.createOscillator(); o.type = 'square'; o.frequency.value = (2200 + Math.random() * 600);
+      const g = this.ctx.createGain(); this._env(g.gain, t + off, 0.001, 0.07, 0.06);
+      o.connect(g); g.connect(this.sfxBus); g.connect(this.reverb);
+      o.start(t + off); o.stop(t + off + 0.09);
+    }
+    const o2 = this.ctx.createOscillator(); o2.type = 'sawtooth';
+    o2.frequency.setValueAtTime(220, t); o2.frequency.exponentialRampToValueAtTime(150, t + 0.18);
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 700; bp.Q.value = 4;
+    const g2 = this.ctx.createGain(); this._env(g2.gain, t, 0.01, 0.16, 0.2);
+    o2.connect(bp); bp.connect(g2); g2.connect(this.sfxBus);
+    o2.start(t); o2.stop(t + 0.26);
   }
 
   // Shofar-ish blast to punctuate a new hall / wave

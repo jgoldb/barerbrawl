@@ -17,9 +17,15 @@ function scaleUV(geo, sx, sy) {
   for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * sx, uv.getY(i) * sy);
   uv.needsUpdate = true;
 }
+// Floor/ceiling plane. Tiling is baked entirely into these per-cell UVs so the shared
+// surface texture (see surf) can keep a constant repeat of 1. The OLD code tiled these
+// TWICE — once via scaleUV here and again via a per-cell texture.repeat of the same
+// (size/TILE) factor — so the effective tiling was (size/TILE)². We fold that whole factor
+// into the UVs here, which reproduces the exact look while letting every cell share one
+// texture. (Walls only ever tiled once, so addWall's scaleUV is unchanged.)
 function planeXZ(w, d, mat, up = true) {
   const g = new THREE.PlaneGeometry(w, d);
-  scaleUV(g, w / TILE, d / TILE);
+  scaleUV(g, (w / TILE) * (w / TILE), (d / TILE) * (d / TILE));
   const m = new THREE.Mesh(g, mat);
   m.rotation.x = up ? -Math.PI / 2 : Math.PI / 2;
   m.receiveShadow = true;
@@ -96,7 +102,7 @@ function sideOf(dir) {
 function makeInstance(cell) {
   return {
     cell, group: new THREE.Group(),
-    staticColliders: [], gates: [], lights: [], flames: [], glows: [], windows: [],
+    staticColliders: [], gates: [], lights: [], flames: [], glows: [], windows: [], bookshelves: [], seats: [],
     _mats: [], _geos: [],
     center: cell.center || { x: (cell.minX + cell.maxX) / 2, z: (cell.minZ + cell.maxZ) / 2 },
     floorY: 0,
@@ -123,14 +129,41 @@ function makeInstance(cell) {
   };
 }
 
-function surf(inst, baseMat, rx = 1, ry = 1) {
-  const m = baseMat.clone();
-  if (baseMat.map) {
-    m.map = baseMat.map.clone(); m.map.needsUpdate = true;
-    m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.repeat.set(rx, ry);
+// Shared surface material per base (floor / ceiling / wall). The old surf() cloned the
+// material AND its texture per cell and forced a fresh GPU upload (needsUpdate), then
+// disposed it on teardown — churning ~1 MB of texture uploads for every room streamed in and
+// out (a chunk of the room first-draw stall). Now ONE material+texture is built per base and
+// reused by every cell: all tiling lives in the per-cell geometry UVs (see planeXZ /
+// addWall), so a constant texture.repeat of 1 serves every size. Shared → never pushed to
+// inst._mats and never disposed (bounded, like the MAT.* palette). `offset` returns a
+// distinct variant carrying polygonOffset for the corridor walls, whose jamb overlaps the
+// room's and would otherwise z-fight.
+// Shared surface material per base (floor / ceiling / wall). The old surf() cloned the
+// material AND its texture per cell and forced a fresh GPU upload (needsUpdate), then
+// disposed it on teardown — churning ~1 MB of texture uploads for every room streamed in and
+// out (a chunk of the room first-draw stall). Now ONE material+texture is built per base and
+// reused by every cell: all tiling lives in the per-cell geometry UVs (see planeXZ /
+// addWall), so a constant texture.repeat of 1 serves every size. Shared → never pushed to
+// inst._mats and never disposed (bounded, like the MAT.* palette). `offset` returns a
+// distinct variant carrying polygonOffset for the corridor walls, whose jamb overlaps the
+// room's and would otherwise z-fight.
+const _surfCache = new Map();
+function surf(baseMat, offset = false) {
+  let entry = _surfCache.get(baseMat);
+  if (!entry) { entry = {}; _surfCache.set(baseMat, entry); }
+  const k = offset ? 'off' : 'plain';
+  if (!entry[k]) {
+    const m = baseMat.clone();
+    if (baseMat.map) {
+      m.map = baseMat.map.clone();
+      m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping;
+      m.map.repeat.set(1, 1);
+      m.map.needsUpdate = true;
+    }
+    if (offset) { m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 1; }
+    entry[k] = m;
   }
-  inst._mats.push(m);
-  return m;
+  return entry[k];
 }
 
 function addWall(inst, wallMat, rect, side, gap, gapW) {
@@ -191,21 +224,18 @@ export function buildCorridor(cell, rng, quality) {
   const w = maxX - minX, d = maxZ - minZ;
   const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
 
-  const floorMat = surf(inst, MAT.floor, w / TILE, d / TILE);
+  const floorMat = surf(MAT.floor);
   const floor = planeXZ(w, d, floorMat); floor.position.set(cx, 0, cz); inst.group.add(floor);
-  const ceilMat = surf(inst, MAT.ceiling, w / TILE, d / TILE);
+  const ceilMat = surf(MAT.ceiling);
   const ceil = planeXZ(w, d, ceilMat, false); ceil.position.set(cx, WALL_H, cz); inst.group.add(ceil);
 
-  const wallMat = surf(inst, MAT.wallCool);
   // At every doorway the corridor's side walls (extended by WALL_T past the seam)
-  // interpenetrate the room's entry/exit jamb — two opaque boxes sharing a coplanar
-  // face at identical depth, which z-fights and pops the two wall textures in/out as
-  // the camera moves. Push the corridor walls very slightly deeper so the room's door
-  // frame always wins the tie. (Room walls use different material instances, so only
-  // the corridor side is biased — the depth offset is invisible everywhere else.)
-  wallMat.polygonOffset = true;
-  wallMat.polygonOffsetFactor = 1;
-  wallMat.polygonOffsetUnits = 1;
+  // interpenetrate the room's entry/exit jamb — two opaque boxes sharing a coplanar face at
+  // identical depth, which z-fights and pops the two wall textures in/out as the camera
+  // moves. The `offset` variant biases the corridor walls very slightly deeper so the room's
+  // door frame always wins the tie. (Room walls use the plain variant, so only the corridor
+  // side is biased — the depth offset is invisible everywhere else.)
+  const wallMat = surf(MAT.wallCool, true);
   const dir = cell.dir;
   const alongZ = dir.z !== 0; // corridor runs along Z -> side walls are W/E
   if (alongZ) {
@@ -240,8 +270,19 @@ export function buildCorridor(cell, rng, quality) {
     if (alongZ) { bs.position.set(minX + 0.26, 0, cz + rng.spread(d / 2 - 2)); bs.rotation.y = Math.PI / 2; }
     else { bs.position.set(cx + rng.spread(w / 2 - 2), 0, minZ + 0.26); bs.rotation.y = 0; }
     inst.group.add(bs);
+    registerShelf(inst, bs);   // track the shelf so a slam can spill its sefarim
   }
   return inst;
+}
+
+// Register a placed bookshelf's controller so its falling-book mechanic can be driven
+// (the director ticks it against the player each frame). refreshWorld() must run after the
+// group has been positioned + rotated so its world transform/footprint are correct.
+function registerShelf(inst, bs) {
+  const sh = bs.userData.shelf;
+  if (!sh) return;
+  sh.refreshWorld();
+  inst.bookshelves.push(sh);
 }
 
 // ============================================================ ROOM
@@ -249,7 +290,7 @@ export function buildCorridor(cell, rng, quality) {
 // and BEFORE the spawn grid is sampled. Used by the title/intro backdrop to stake out
 // its hand-placed set-piece (ark, bimah, candelabra) and fixed cast so procedural
 // furniture and the crowd both keep clear of them. Gameplay rooms pass nothing.
-export function buildRoom(cell, rng, quality, reserve = []) {
+export function buildRoom(cell, rng, quality, reserve = [], opts = {}) {
   const inst = makeInstance(cell);
   const { minX, maxX, minZ, maxZ } = cell;
   const w = maxX - minX, d = maxZ - minZ;
@@ -258,13 +299,13 @@ export function buildRoom(cell, rng, quality, reserve = []) {
 
   // ---- floor + ceiling
   const floorBase = MAT[td.floor] || MAT.floor;
-  const floorMat = surf(inst, floorBase, w / TILE, d / TILE);
+  const floorMat = surf(floorBase);
   const floor = planeXZ(w, d, floorMat); floor.position.set(cx, 0, cz); inst.group.add(floor);
-  const ceilMat = surf(inst, MAT.ceiling, w / TILE, d / TILE);
+  const ceilMat = surf(MAT.ceiling);
   const ceil = planeXZ(w, d, ceilMat, false); ceil.position.set(cx, WALL_H, cz); inst.group.add(ceil);
 
   // ---- walls with gaps at entrance/exit
-  const wallMat = surf(inst, MAT[td.wall] || MAT.wallWarm);
+  const wallMat = surf(MAT[td.wall] || MAT.wallWarm);
   const entSide = sideOf(cell.entryDir);
   const exitSide = sideOf(cell.exitDir);
   const gapCoordFor = (side, pt) => (side === 'E' || side === 'W') ? pt.z : pt.x;
@@ -298,8 +339,11 @@ export function buildRoom(cell, rng, quality, reserve = []) {
     inst.group.add(ch); inst.flames.push(...ch.userData.flames);
     addPointLight(inst, td.light, cell.boss ? 16 : 12, Math.max(w, d) * 0.9, lx, WALL_H - 1.4, cz);
   }
-  // primary shadow-casting spot from the ceiling
-  if (quality.shadows) {
+  // primary shadow-casting spot from the ceiling. Streamed gameplay rooms pass `noSpot`: the
+  // director lights them with a fixed-size spotlight pool instead (see Director._applySpotBudget),
+  // so the scene's spotlight COUNT never changes as halls stream and shaders never recompile.
+  // The title/cut-scene backdrops keep their own spot (single static scenes, no streaming).
+  if (quality.shadows && !opts.noSpot) {
     const spot = new THREE.SpotLight(td.light, 40, Math.max(w, d) * 1.4, Math.PI / 3.1, 0.5, 1.6);
     spot.position.set(cx, WALL_H - 0.4, cz);
     spot.target.position.set(cx, 0, cz);
@@ -404,6 +448,22 @@ function place(inst, prop, x, z, rotY = 0) {
     inst.staticColliders.push({ minX: x - hx, maxX: x + hx, minZ: z - hz, maxZ: z + hz, top });
     inst._footprints.push({ x, z, hx, hz });
   }
+  // sittable props (benches/chairs) expose local seat anchors — transform each into a
+  // world seat the player/NPCs can occupy. A yaw-only prop rotation maps local (lx,lz)
+  // to world by the same rotation, and the occupant's facing yaw is rotY + the seat's.
+  const seats = prop.userData.seats;
+  if (seats) {
+    const cos = Math.cos(rotY), sin = Math.sin(rotY);
+    for (const s of seats) {
+      inst.seats.push({
+        x: x + s.x * cos + s.z * sin,
+        y: s.y,
+        z: z - s.x * sin + s.z * cos,
+        ry: rotY + (s.ry || 0),
+        occupant: null,
+      });
+    }
+  }
   // collect flame meshes from this prop and any nested sub-props
   prop.traverse((o) => { if (o.userData && o.userData.flames) inst.flames.push(...o.userData.flames); });
   return prop;
@@ -500,6 +560,7 @@ function perimeterShelves(inst, cell, rng) {
       if (s.along === 'z') { bs.position.set(s.fixed + (s.side === 'W' ? 0.26 : -0.26), 0, c); bs.rotation.y = s.side === 'W' ? Math.PI / 2 : -Math.PI / 2; }
       else { bs.position.set(c, 0, s.fixed + (s.side === 'N' ? 0.26 : -0.26)); bs.rotation.y = s.side === 'N' ? 0 : Math.PI; }
       inst.group.add(bs);
+      registerShelf(inst, bs);   // track the shelf so a slam can spill its sefarim
       // full-width collider + footprint (the old 0.3×0.3 stub let props clip the shelf ends)
       registerWallProp(inst, s, c, sw / 2, 0.3, 0.26, true);
     }
@@ -584,7 +645,13 @@ function decorate(inst, cell, rng) {
       if (nearGap(cell, bx, bz)) continue;
       if (!fitsBounds(inst.innerBounds, bx, bz, bhx, bhz)) continue;
       if (overlaps(inst, bx, bz, bhx, bhz, 0.1, nBefore)) continue;
-      place(inst, Props.bench(len * 0.85), bx, bz, rot);
+      // A bench's seats face its local +Z. Turn each bench so that front faces back at
+      // the table (the +offset side is flipped 180°), so anyone sitting looks at the
+      // shulchan rather than out into the room. The bench mesh is symmetric, and this
+      // 180°/mirror never changes its axis-aligned footprint (place() keys the swap on
+      // |sin rotY|), so colliders are unaffected — only the seat facing flips.
+      const benchRot = rot ? (s > 0 ? -Math.PI / 2 : Math.PI / 2) : (s > 0 ? Math.PI : 0);
+      place(inst, Props.bench(len * 0.85), bx, bz, benchRot);
     }
     // a shtender near some tables
     if (theme !== 'dining' && rng.chance(0.3)) {

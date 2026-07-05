@@ -1,0 +1,200 @@
+{
+  "intro-1": {
+    "hash": "04974764fdc18fbf",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 53960,
+    "chars": 57
+  },
+  "intro-2": {
+    "hash": "c6860625bf550606",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 65663,
+    "chars": 66
+  },
+  "intro-3": {
+    "hash": "43814aae61795129",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 56050,
+    "chars": 57
+  },
+  "intro-4": {
+    "hash": "6e6da8b376beeac8",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 17598,
+    "chars": 10
+  },
+  "intro-5": {
+    "hash": "b6ffffccadc4c094",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 61902,
+    "chars": 52
+  },
+  "intro-6": {
+    "hash": "e928060bb2c825a8",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 44347,
+    "chars": 39
+  },
+  "dvar-1": {
+    "hash": "242c0a2aa29d353c",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 72351,
+    "chars": 80
+  },
+  "dvar-2": {
+    "hash": "a1fcda995731bd4a",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 104533,
+    "chars": 66
+  },
+  "dvar-3": {
+    "hash": "09d4c61b8585b67d",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 87397,
+    "chars": 87
+  },
+  "dvar-4": {
+    "hash": "ab8b164848ed018b",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 134208,
+    "chars": 100
+  },
+  "dvar-5": {
+    "hash": "ac9ab61ac8fbbf3e",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 136298,
+    "chars": 108
+  },
+  "dvar-6": {
+    "hash": "a9fed182c99723be",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 93248,
+    "chars": 74
+  },
+  "dvar-7": {
+    "hash": "b588a4d49a92647a",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 140060,
+    "chars": 100
+  },
+  "dvar-8": {
+    "hash": "6d56b12b582fd5df",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 99100,
+    "chars": 76
+  },
+  "dvar-9": {
+    "hash": "1f64b215a28d10b7",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 91577,
+    "chars": 74
+  },
+  "dvar-10": {
+    "hash": "dd70be127479e099",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 152599,
+    "chars": 122
+  },
+  "dvar-11": {
+    "hash": "cf025a0b2d9bc5ae",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 166809,
+    "chars": 97
+  },
+  "dvar-12": {
+    "hash": "beca65da69528cc1",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 53124,
+    "chars": 53
+  },
+  "dvar-13": {
+    "hash": "f466808b40063f0a",
+    "voice": "JBFqnCBsd6RMkjVDRZzb",
+    "bytes": 18852,
+    "chars": 12
+  },
+  "finisher-lewie": {
+    "hash": "22a003afbbe4d03d",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 21777,
+    "chars": 15
+  },
+  "zehn-1": {
+    "hash": "493b93cbe92874be",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 40586,
+    "chars": 39
+  },
+  "zehn-2": {
+    "hash": "9dbb069ccdb50fd9",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 152599,
+    "chars": 94
+  },
+  "zehn-3": {
+    "hash": "dcf49cb25082f07e",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 91577,
+    "chars": 83
+  },
+  "zehn-4": {
+    "hash": "958336e8c0f3ab5e",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 150509,
+    "chars": 103
+  },
+  "zehn-5": {
+    "hash": "719639621a990db3",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 47691,
+    "chars": 46
+  },
+  "zehn-6": {
+    "hash": "07dc69b49e9c3393",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 96174,
+    "chars": 84
+  },
+  "zehn-7": {
+    "hash": "03ac220daa95b54d",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 252909,
+    "chars": 172
+  },
+  "zehn-8": {
+    "hash": "94053e8913e2e70d",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 84889,
+    "chars": 62
+  },
+  "zehn-9": {
+    "hash": "491bc6b6b46b960e",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 155524,
+    "chars": 123
+  },
+  "zehn-10": {
+    "hash": "beb902cd293289ed",
+    "voice": "pqHfZKP75CvOlQylNhV4",
+    "bytes": 244968,
+    "chars": 171
+  },
+  "zehn-11": {
+    "hash": "e0fcb7f89d946b8a",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 26375,
+    "chars": 20
+  },
+  "zehn-12": {
+    "hash": "9af15df408643276",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 156360,
+    "chars": 134
+  },
+  "zehn-13": {
+    "hash": "57111a096e77f52c",
+    "voice": "N2lVS1w4EtoT3dr4eOWO",
+    "bytes": 140896,
+    "chars": 104
+  }
+}

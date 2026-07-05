@@ -27,6 +27,8 @@ export class Cutscene {
     this.beat = b; this.bt = 0;
     if (b.onEnter) b.onEnter();
     if (b.subtitle !== undefined) this.ui.setSubtitle(b.subtitle);
+    // speak this beat's line (interrupts the previous one; no-op if the clip is absent)
+    if (b.vo && this.audio.playVO) this.audio.playVO(b.vo);
     if (b.fade === 'out') this.ui.fade(true, b.fadeDur ?? 0.6);
     if (b.fade === 'in') this.ui.fade(false, b.fadeDur ?? 0.6);
     if (b.cam) this._applyCam(0);
@@ -63,6 +65,7 @@ export class Cutscene {
     if (!this.active) return;
     this.active = false;
     this.beat = null;
+    if (this.audio.stopVO) this.audio.stopVO(); // cut any line still speaking (e.g. on skip)
     this.ui.hideCinema();
     if (this.onDone) { const cb = this.onDone; this.onDone = null; cb(); }
   }

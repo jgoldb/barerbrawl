@@ -89,11 +89,22 @@ export class UI {
     pr.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;z-index:25;pointer-events:none;background:rgba(4,2,1,.35);';
     pr.innerHTML = '<div style="font-family:var(--disp,serif);font-size:34px;letter-spacing:.14em;color:#f4d878;text-shadow:0 3px 18px #000;"><span class="only-kbd">CLICK TO BRAWL</span><span class="only-touch">TAP TO BRAWL</span></div>'
       + '<div style="font-size:15px;color:#c9b98e;font-style:italic;">'
-      + '<span class="only-kbd">WASD move · Mouse look · L-click jab · R-click haymaker · Space jump · E shove</span>'
+      + '<span class="only-kbd">WASD move · Mouse look · L-click jab · R-click haymaker · Space jump · E shove · Q toss shekel · F sit</span>'
       + '<span class="only-touch">Left thumb moves · drag right to look · buttons to brawl</span></div>';
     pr.classList.add('hidden');
     $('hud').appendChild(pr);
     this.promptEl = pr;
+
+    // contextual "sit" reticle: a chair glyph + key hint shown under the crosshair when
+    // the player looks at a bench/chair. Coloured enabled (reachable, free) or disabled
+    // (out of range / occupied) — see setSitCursor().
+    const sc = document.createElement('div');
+    sc.id = 'sit-cursor';
+    sc.innerHTML = '<div class="sit-ic">🪑</div>'
+      + '<div class="sit-key"><span class="only-kbd">Press <b>F</b> to sit</span><span class="only-touch">Tap SIT</span></div>';
+    sc.classList.add('hidden');
+    $('hud').appendChild(sc);
+    this.sitCursorEl = sc;
 
     this._comboBumpT = 0;
     this._toastT = 0;
@@ -176,6 +187,16 @@ export class UI {
   setScore(n) { $('score-val').textContent = Math.floor(n).toLocaleString(); }
   setDepth(n) { $('depth-val').textContent = n; }
 
+  // Shekel pocket: fill n of the coin dots. Also flags the row 'ready' (a soft glow +
+  // the toss hint) whenever the player is holding at least one.
+  setShekels(n, max = 3) {
+    const wrap = $('shekel-dots');
+    if (!wrap) return;
+    const dots = wrap.children;
+    for (let i = 0; i < dots.length; i++) dots[i].classList.toggle('filled', i < n);
+    $('shekel-wrap').classList.toggle('ready', n > 0);
+  }
+
   setCombo(n) {
     const c = $('combo');
     if (n < 2) { c.classList.add('hidden'); return; }
@@ -228,6 +249,24 @@ export class UI {
     }
   }
 
+  // A discrete "the walls just crushed you" red squeeze-flash, fired on each crush beat
+  // while the corner penalty is actively draining HP (see Player._updateCornered). `sev`
+  // (0..1) scales the punch. Snaps on, then eases back out so beats read as pulses.
+  cornerCrush(sev = 1) {
+    const el = $('corner-crush');
+    el.style.transition = 'opacity .04s'; el.style.opacity = (0.4 + 0.4 * sev).toFixed(3);
+    setTimeout(() => { el.style.transition = 'opacity .3s ease'; el.style.opacity = '0'; }, 55);
+  }
+
+  // Mekubal "slow" telegraph, driven each frame by the player's remaining slow time
+  // (0..1): a cold frost vignette closing in, plus a "SLOWED" label — both fade out as
+  // the binding wears off.
+  setSlow(frac) {
+    frac = Math.max(0, Math.min(1, frac));
+    $('slow-vignette').style.opacity = (frac * 0.8).toFixed(3);
+    $('slow-warn').style.opacity = frac > 0.05 ? Math.min(1, frac * 1.5).toFixed(3) : '0';
+  }
+
   setBoss(name, frac) {
     if (frac == null) { this.bossBar.style.opacity = '0'; return; }
     this.bossBar.style.opacity = '1';
@@ -247,6 +286,16 @@ export class UI {
   }
 
   showFinisherPrompt(on) { this.finisherPromptEl.classList.toggle('hidden', !on); }
+
+  // Sit reticle: state is 'enabled' (free seat in reach), 'disabled' (seat out of
+  // range or taken), or 'none'/null (not looking at a seat → hidden).
+  setSitCursor(state) {
+    const el = this.sitCursorEl;
+    if (!state || state === 'none') { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    el.classList.toggle('enabled', state === 'enabled');
+    el.classList.toggle('disabled', state === 'disabled');
+  }
 
   lewieBanner() {
     const el = this.lewieEl;
